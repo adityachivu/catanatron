@@ -10,16 +10,17 @@ from catanatron.game import Game
 from catanatron.models.player import Color
 from catanatron.models.enums import Action, ActionType
 from catanatron.state_functions import get_longest_road_length, get_state_index
+from catanatron.state import State
 
 
-def longest_roads_by_player(state):
+def longest_roads_by_player(state: State):
     result = dict()
     for color in state.colors:
         result[color.value] = get_longest_road_length(state, color)
     return result
 
 
-def action_from_json(data):
+def action_from_json(data) -> Action:
     color = Color[data[0]]
     action_type = ActionType[data[1]]
     if action_type == ActionType.BUILD_ROAD:
@@ -30,11 +31,10 @@ def action_from_json(data):
             raise ValueError("Year of Plenty action must have 1 or 2 resources")
         action = Action(color, action_type, resources)
     elif action_type == ActionType.MOVE_ROBBER:
-        coordinate, victim, _ = data[2]
+        coordinate, victim = data[2]
         coordinate = tuple(coordinate)
         victim = Color[victim] if victim else None
-        value = (coordinate, victim, None)
-        action = Action(color, action_type, value)
+        action = Action(color, action_type, (coordinate, victim))
     elif action_type == ActionType.MARITIME_TRADE:
         value = tuple(data[2])
         action = Action(color, action_type, value)
