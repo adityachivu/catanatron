@@ -2,7 +2,7 @@ from collections import namedtuple
 
 from rich.table import Table
 
-from catanatron.models.player import Color, HumanPlayer, RandomPlayer
+from catanatron.models.player import Color, HumanPlayer, RandomPlayer, Player
 from catanatron.players.weighted_random import WeightedRandomPlayer
 from catanatron.players.value import ValueFunctionPlayer
 from catanatron.players.minimax import AlphaBetaPlayer, SameTurnAlphaBetaPlayer
@@ -65,6 +65,66 @@ CLI_PLAYERS = [
         SameTurnAlphaBetaPlayer,
     ),
 ]
+
+
+# =============================================================================
+# LLM Player Wrapper (lazy import to avoid requiring LLM dependencies)
+# =============================================================================
+
+class BalancedLLMPlayer(Player):
+    """
+    Wrapper for LLM player that works with CLI.
+    
+    Params: PROVIDER, MODEL, PERSONA
+    Example: LLM:gemini:gemini-2.5-flash:balanced
+    Defaults: gemini, gemini-2.5-flash, balanced
+    """
+    
+    def __init__(self, color, provider="gemini", model="gemini-2.5-flash", persona="balanced"):
+        super().__init__(color, is_bot=True)
+        # Lazy import to avoid requiring LLM dependencies at module load time
+        try:
+            from catanatron.players.llm import create_llm_player
+            self._player = create_llm_player(
+                color, 
+                provider=provider, 
+                model=model, 
+                persona=persona
+            )
+        except ImportError as e:
+            raise ImportError(
+                "LLM player dependencies not installed. "
+                "Install with: pip install pydantic-ai"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to create LLM player. Make sure API keys are set. Error: {e}"
+            ) from e
+    
+    def decide(self, game, playable_actions):
+        return self._player.decide(game, playable_actions)
+    
+    def reset_state(self):
+        self._player.reset_state()
+    
+    def __repr__(self):
+        return f"BalancedLLMPlayer:{self.color.value}"
+
+
+# Register LLM player (only if dependencies are available)
+try:
+    CLI_PLAYERS.append(
+        CliPlayer(
+            "LLM",
+            "BalancedLLMPlayer",
+            "LLM-powered player with strategic advisor and negotiation. "
+            "Params: PROVIDER, MODEL, PERSONA (defaults: gemini, gemini-2.5-flash, balanced)",
+            BalancedLLMPlayer,
+        )
+    )
+except Exception:
+    # Silently fail if LLM dependencies aren't available
+    pass
 
 
 def parse_cli_string(player_string):
