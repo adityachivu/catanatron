@@ -36,6 +36,9 @@ dev = [
     "coverage",
     "coveralls",
 ]
+llm = [
+    "pydantic-ai",
+]
 
 [project.urls]
 Homepage = "https://github.com/bcollazo/catanatron"
