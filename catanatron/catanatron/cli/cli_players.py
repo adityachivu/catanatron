@@ -96,10 +96,7 @@ class BalancedLLMPlayer(Player):
                 "LLM player dependencies not installed. "
                 "Install with: pip install pydantic-ai"
             ) from e
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to create LLM player. Make sure API keys are set. Error: {e}"
-            ) from e
+        # Let other errors (API key missing, etc.) propagate naturally
     
     def decide(self, game, playable_actions):
         return self._player.decide(game, playable_actions)

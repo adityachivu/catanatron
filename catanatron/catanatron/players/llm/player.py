@@ -10,20 +10,23 @@ This player:
 For POC: Uses stateless memory but architecture supports full memory.
 """
 
-import asyncio
-from dataclasses import dataclass, field
-from typing import List, Optional, Any, Dict, Union
+import logging
+from dataclasses import dataclass
+from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field
 
 from catanatron.game import Game
 from catanatron.models.player import Player, Color
-from catanatron.models.enums import Action, ActionType, RESOURCES
+from catanatron.models.enums import Action, ActionType
 
-from catanatron.players.llm.strategic_advisor import StrategicAdvisor, ActionRanking
+from catanatron.players.llm.strategic_advisor import StrategicAdvisor
 from catanatron.players.llm.state_renderer import StateRenderer
 from catanatron.players.llm.memory import NegotiationMemory, StatelessMemory
-from catanatron.players.llm.providers import LLMConfig, LLMClient, MockLLMClient
+from catanatron.players.llm.providers import LLMConfig, LLMClient
 from catanatron.players.llm.prompts import get_system_prompt, build_decision_prompt
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -101,7 +104,7 @@ class LLMPlayerConfig:
     use_stateless_memory: bool = True  # True for POC
     enable_negotiation: bool = True
     max_negotiation_rounds: int = 3
-    fallback_to_random: bool = True  # If LLM fails, pick randomly
+    fallback_to_random: bool = False  # If LLM fails, raise error (fail loudly)
 
 
 class LLMNegotiatingPlayer(Player):
@@ -188,30 +191,24 @@ class LLMNegotiatingPlayer(Player):
         if current_prompt and current_prompt.value == "DECIDE_TRADE":
             return self._handle_trade_decision(game, playable_actions)
         
-        # Use async decision-making
+        # Use synchronous decision-making
         try:
-            return asyncio.run(self._decide_async(game, playable_actions))
+            logger.info(f"LLM Player {self.color.value} making decision with {len(playable_actions)} actions")
+            return self._decide_sync(game, playable_actions)
         except Exception as e:
             # Fallback on error
             if self.config.fallback_to_random:
+                logger.warning(f"LLM call failed for {self.color.value}: {e}. Falling back to random action.")
                 import random
                 return random.choice(playable_actions)
+            logger.error(f"LLM call failed for {self.color.value}: {e}")
             raise
     
-    async def _decide_async(
-        self, 
-        game: Game, 
-        playable_actions: List[Action]
-    ) -> Action:
+    def _decide_sync(self, game: Game, playable_actions: List[Action]) -> Action:
         """
-        Async decision-making with LLM.
+        Synchronous decision-making with LLM.
         
-        Args:
-            game: Current game state
-            playable_actions: List of legal actions
-            
-        Returns:
-            The chosen action
+        This uses the synchronous client API to avoid event loop issues.
         """
         # Get strategic rankings
         rankings = self.advisor.rank_actions(
@@ -241,10 +238,12 @@ class LLMNegotiatingPlayer(Player):
             memory_text="",    # Already included
         )
         
-        # Call LLM
+        # Call LLM using synchronous API
         try:
             client = self._get_llm_client()
-            response = await client.run(prompt)
+            logger.debug(f"Calling LLM for {self.color.value} (turn {game.state.num_turns}) [sync]")
+            response = client.run_sync(prompt)
+            logger.info(f"LLM response received for {self.color.value}: chose action #{response.chosen_action_index}")
             
             # Log decision
             self.decision_log.append({
@@ -266,6 +265,7 @@ class LLMNegotiatingPlayer(Player):
                 and self.config.enable_negotiation
                 and response.negotiation_message
             ):
+                logger.debug(f"{self.color.value} wants to negotiate: {response.negotiation_message[:50]}...")
                 # Record the negotiation message
                 self.memory.record_message(
                     sender=self.color,
@@ -297,9 +297,10 @@ class LLMNegotiatingPlayer(Player):
         except Exception as e:
             # On LLM error, fall back to top-ranked action
             if self.config.fallback_to_random:
+                logger.warning(f"LLM error for {self.color.value}, falling back to top-ranked action: {e}")
                 return rankings[0].action
+            logger.error(f"LLM error for {self.color.value}: {e}")
             raise
-    
     def _handle_trade_decision(
         self, 
         game: Game, 
@@ -446,7 +447,7 @@ class MockLLMPlayer(LLMNegotiatingPlayer):
         super().__init__(color, config, is_bot)
         self.strategy = strategy
     
-    async def _decide_async(
+    def _decide_sync(
         self, 
         game: Game, 
         playable_actions: List[Action]

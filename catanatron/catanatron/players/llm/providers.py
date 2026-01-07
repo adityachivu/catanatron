@@ -11,17 +11,22 @@ The abstraction allows easy switching between providers without changing
 the player implementation.
 """
 
-from dataclasses import dataclass, field
-from typing import Optional, Type, TypeVar, Generic, Any, Union
+from dataclasses import dataclass
+from typing import Optional, Type, TypeVar, Generic
 from enum import Enum
 import asyncio
+import os
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 class LLMProvider(str, Enum):
     """Supported LLM providers."""
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
-    GEMINI = "gemini"
+    GEMINI = "gemini"  # Google's Gemini models
     OLLAMA = "ollama"
 
 
@@ -119,7 +124,8 @@ class LLMConfig:
         elif self.provider == LLMProvider.ANTHROPIC:
             return f"anthropic:{self.model}"
         elif self.provider == LLMProvider.GEMINI:
-            return f"google:{self.model}"  # PydanticAI uses "google:" prefix for Gemini
+            # PydanticAI uses "google-gla:" for Google Generative Language API (standard API)
+            return f"google-gla:{self.model}"
         elif self.provider == LLMProvider.OLLAMA:
             return f"ollama:{self.model}"
         else:
@@ -168,10 +174,30 @@ class LLMClient(Generic[T]):
         self._agent = None
         self._initialized = False
     
+    def _validate_api_key(self):
+        """Validate that required API key is set."""
+        key_map = {
+            LLMProvider.GEMINI: "GOOGLE_API_KEY",
+            LLMProvider.OPENAI: "OPENAI_API_KEY", 
+            LLMProvider.ANTHROPIC: "ANTHROPIC_API_KEY",
+            LLMProvider.OLLAMA: None,  # No key needed
+        }
+        
+        required_key = key_map.get(self.config.provider)
+        if required_key and not os.getenv(required_key):
+            raise ValueError(
+                f"{required_key} environment variable not set! "
+                f"Set it with: export {required_key}='your-api-key-here'"
+            )
+    
     def _ensure_initialized(self):
         """Lazily initialize the PydanticAI agent."""
         if self._initialized:
             return
+        
+        # Validate API keys are set
+        logger.info(f"Initializing LLM client: {self.config.provider.value}:{self.config.model}")
+        self._validate_api_key()
         
         try:
             from pydantic_ai import Agent
@@ -182,15 +208,17 @@ class LLMClient(Generic[T]):
             )
         
         model_string = self.config.get_pydantic_ai_model_string()
+        logger.debug(f"Creating PydanticAI agent with model string: {model_string}")
         
         self._agent = Agent(
             model_string,
-            result_type=self.result_type,
+            output_type=self.result_type,  # Changed from result_type to output_type
             system_prompt=self.system_prompt or "",
             retries=self.config.retries,
         )
         
         self._initialized = True
+        logger.info(f"LLM client initialized successfully: {self.config.provider.value}:{self.config.model}")
     
     async def run(self, prompt: str, **kwargs) -> T:
         """
@@ -205,8 +233,13 @@ class LLMClient(Generic[T]):
         """
         self._ensure_initialized()
         
+        logger.debug(f"Sending prompt to LLM ({self.config.provider.value}:{self.config.model})")
+        logger.debug(f"Prompt length: {len(prompt)} characters")
+        
         result = await self._agent.run(prompt, **kwargs)
-        return result.data
+        
+        logger.debug(f"Received response from LLM ({self.config.provider.value}:{self.config.model})")
+        return result.output  # Changed from result.data to result.output per pydantic-ai API
     
     def run_sync(self, prompt: str, **kwargs) -> T:
         """
@@ -219,7 +252,19 @@ class LLMClient(Generic[T]):
         Returns:
             Parsed response of type T
         """
-        return asyncio.run(self.run(prompt, **kwargs))
+        self._ensure_initialized()
+        
+        logger.debug(f"Sending prompt to LLM ({self.config.provider.value}:{self.config.model}) [sync]")
+        logger.debug(f"Prompt length: {len(prompt)} characters")
+        
+        # Use the agent's run_sync if available, otherwise use asyncio.run
+        if hasattr(self._agent, 'run_sync'):
+            result = self._agent.run_sync(prompt, **kwargs)
+        else:
+            result = asyncio.run(self.run(prompt, **kwargs))
+        
+        logger.debug(f"Received response from LLM ({self.config.provider.value}:{self.config.model}) [sync]")
+        return result.output if hasattr(result, 'output') else result
 
 
 class MockLLMClient(Generic[T]):
