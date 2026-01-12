@@ -61,7 +61,7 @@ CATAN_SYSTEM_PROMPT = """You are an expert Settlers of Catan player. Your goal i
 - Balance between expansion and resource accumulation
 
 ## Decision Making
-Every turn use the get_game_and_action_analysis tool exactly onceto get a comprehensive analysis of the game state and available actions.
+Every turn use the `get_game_and_action_analysis` tool IMMEDIATELY before doing any thinking or reasoning. Do this exactly once per turn to get a comprehensive analysis of the game state and available actions.
 Use the available tools to analyze the game state before making decisions.
 Consider both immediate gains and long-term strategy.
 If a strategy advisor recommendation is provided, consider it but you may choose differently based on your analysis.
@@ -89,8 +89,9 @@ class BaseLLMPlayer(Player):
         color: Color,
         model: str = "anthropic:claude-sonnet-4-20250514",
         output_mode: Literal["index", "structured"] = "index",
-        timeout: Optional[float] = 10.0,
+        timeout: Optional[float] = 120.0,
         tool_calls_limit: int = 10,
+        is_bot: bool = True,
         **strategy_kwargs,
     ):
         """
@@ -100,13 +101,18 @@ class BaseLLMPlayer(Player):
             color: Player color
             model: PydanticAI model string (e.g., "anthropic:claude-sonnet-4-20250514", "openai:gpt-4o")
             output_mode: "index" for fast mode, "structured" for detailed action types
-            timeout: Timeout in seconds for LLM calls (default: 10.0)
+            timeout: Timeout in seconds for LLM calls (default: 120.0)
             tool_calls_limit: Overall tool call limit per decision (default: 10)
-            tool_call_limit_per_tool: Maximum calls per individual tool (default: 2)
+            is_bot: Whether this is a bot player (default: True)
             **strategy_kwargs: Arguments passed to parent strategy player (e.g., depth for AlphaBeta)
         """
         # Initialize parent player(s)
+        # Note: is_bot is handled explicitly here to avoid passing it through
+        # strategy_kwargs to strategy players that don't accept it
         super().__init__(color, **strategy_kwargs)
+        
+        # Set is_bot after parent chain init (Player sets it, strategy players may not)
+        self.is_bot = is_bot
 
         self.model = model
         self.output_mode = output_mode
@@ -306,12 +312,10 @@ class BaseLLMPlayer(Player):
                 turn_number=current_turn,
                 error=str(e)
             )
-            if recommendation is not None:
-                return recommendation
-            return playable_actions[0]
         except Exception as e:
             # On any other error (including UsageLimitExceeded), fall back to strategy recommendation or first action
             logfire.error(f"LLM player {self.color} error: {e}", turn_number=current_turn)
+        finally:
             if recommendation is not None:
                 return recommendation
             return playable_actions[0]

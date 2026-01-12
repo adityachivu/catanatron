@@ -52,6 +52,8 @@ def register_tools(agent: Agent) -> None:
         full_analysis = {
             "game_state": StateFormatter.format_full_state(ctx.deps.game, ctx.deps.color),
             "available_actions": [StateFormatter.format_action(action, i) for i, action in enumerate(ctx.deps.playable_actions)],
+            "strategy_recommendation": ctx.deps.strategy_recommendation if ctx.deps.strategy_recommendation else "No strategy advisor configured",
+            "strategy_reasoning": ctx.deps.strategy_reasoning if ctx.deps.strategy_reasoning else "No detailed reasoning available",
         }
         return full_analysis
 

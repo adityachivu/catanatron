@@ -78,7 +78,7 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer, AlphaBetaPlayer):
         model: str = "anthropic:claude-sonnet-4-20250514",
         depth: int = 2,
         prunning: bool = False,
-        timeout: Optional[float] = 10.0,
+        timeout: Optional[float] = 120.0,
         tool_calls_limit: int = 10,
         output_mode: Literal["index", "structured"] = "index",
         is_bot: bool = True,
@@ -91,26 +91,22 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer, AlphaBetaPlayer):
             model: LLM model string
             depth: Search depth for AlphaBeta (higher = slower but better recommendations)
             prunning: Whether to use alpha-beta pruning
-            timeout: Timeout in seconds for LLM calls (default: 10.0)
+            timeout: Timeout in seconds for LLM calls (default: 120.0)
             tool_calls_limit: Overall tool call limit per decision (default: 10)
             output_mode: Action output format
             is_bot: Whether this is a bot player
         """
         # Initialize AlphaBeta first (it will call Player.__init__)
-        AlphaBetaPlayer.__init__(self, color, depth=depth, prunning=prunning)
-
-        # Then initialize LLM components
-        self.model = model
-        self.timeout = timeout
-        self.tool_calls_limit = tool_calls_limit
-        self.output_mode = output_mode
-        self.is_bot = is_bot
-
-        # Import here to avoid circular imports
-        from catanatron.players.llm.history import ConversationHistoryManager
-
-        self.history_manager = ConversationHistoryManager()
-        self.agent = self._create_agent()
+        super().__init__(
+            color,
+            model=model,
+            output_mode=output_mode,
+            is_bot=is_bot,
+            timeout=timeout,
+            tool_calls_limit=tool_calls_limit,
+            depth=depth,
+            prunning=prunning,
+        )
 
     def __repr__(self) -> str:
         base = AlphaBetaPlayer.__repr__(self)
@@ -140,6 +136,8 @@ class LLMMCTSPlayer(BaseLLMPlayer, MCTSPlayer):
         model: str = "anthropic:claude-sonnet-4-20250514",
         num_simulations: int = 10,
         prunning: bool = False,
+        timeout: Optional[float] = 120.0,
+        tool_calls_limit: int = 10,
         output_mode: Literal["index", "structured"] = "index",
         is_bot: bool = True,
     ):
@@ -151,21 +149,22 @@ class LLMMCTSPlayer(BaseLLMPlayer, MCTSPlayer):
             model: LLM model string
             num_simulations: Number of MCTS simulations (higher = slower but better)
             prunning: Whether to use action pruning
+            timeout: Timeout in seconds for LLM calls (default: 120.0)
+            tool_calls_limit: Overall tool call limit per decision (default: 10)
             output_mode: Action output format
             is_bot: Whether this is a bot player
         """
         # Initialize MCTS first
-        MCTSPlayer.__init__(self, color, num_simulations=num_simulations, prunning=prunning)
-
-        # Then initialize LLM components
-        self.model = model
-        self.output_mode = output_mode
-        self.is_bot = is_bot
-
-        from catanatron.players.llm.history import ConversationHistoryManager
-
-        self.history_manager = ConversationHistoryManager()
-        self.agent = self._create_agent()
+        super().__init__(
+            color,
+            model=model,
+            output_mode=output_mode,
+            is_bot=is_bot,
+            timeout=timeout,
+            tool_calls_limit=tool_calls_limit,
+            num_simulations=num_simulations,
+            prunning=prunning,
+        )
 
     def __repr__(self) -> str:
         base = MCTSPlayer.__repr__(self)
@@ -192,6 +191,8 @@ class LLMValuePlayer(BaseLLMPlayer, ValueFunctionPlayer):
         model: str = "anthropic:claude-sonnet-4-20250514",
         value_fn_builder_name: Optional[str] = None,
         output_mode: Literal["index", "structured"] = "index",
+        timeout: Optional[float] = 120.0,
+        tool_calls_limit: int = 10,
         is_bot: bool = True,
     ):
         """
@@ -202,21 +203,20 @@ class LLMValuePlayer(BaseLLMPlayer, ValueFunctionPlayer):
             model: LLM model string
             value_fn_builder_name: Which value function to use ("C" for contender, None for base)
             output_mode: Action output format
+            timeout: Timeout in seconds for LLM calls (default: 120.0)
+            tool_calls_limit: Overall tool call limit per decision (default: 10)
             is_bot: Whether this is a bot player
         """
         # Initialize ValueFunctionPlayer first
-        ValueFunctionPlayer.__init__(
-            self, color, value_fn_builder_name=value_fn_builder_name, is_bot=is_bot
+        super().__init__(
+            color,
+            model=model,
+            output_mode=output_mode,
+            is_bot=is_bot,
+            timeout=timeout,
+            tool_calls_limit=tool_calls_limit,
+            value_fn_builder_name=value_fn_builder_name,
         )
-
-        # Then initialize LLM components
-        self.model = model
-        self.output_mode = output_mode
-
-        from catanatron.players.llm.history import ConversationHistoryManager
-
-        self.history_manager = ConversationHistoryManager()
-        self.agent = self._create_agent()
 
     def __repr__(self) -> str:
         base = ValueFunctionPlayer.__str__(self)
