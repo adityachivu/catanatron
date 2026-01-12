@@ -78,6 +78,8 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer, AlphaBetaPlayer):
         model: str = "anthropic:claude-sonnet-4-20250514",
         depth: int = 2,
         prunning: bool = False,
+        timeout: Optional[float] = 10.0,
+        tool_calls_limit: int = 10,
         output_mode: Literal["index", "structured"] = "index",
         is_bot: bool = True,
     ):
@@ -89,6 +91,8 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer, AlphaBetaPlayer):
             model: LLM model string
             depth: Search depth for AlphaBeta (higher = slower but better recommendations)
             prunning: Whether to use alpha-beta pruning
+            timeout: Timeout in seconds for LLM calls (default: 10.0)
+            tool_calls_limit: Overall tool call limit per decision (default: 10)
             output_mode: Action output format
             is_bot: Whether this is a bot player
         """
@@ -97,6 +101,8 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer, AlphaBetaPlayer):
 
         # Then initialize LLM components
         self.model = model
+        self.timeout = timeout
+        self.tool_calls_limit = tool_calls_limit
         self.output_mode = output_mode
         self.is_bot = is_bot
 
