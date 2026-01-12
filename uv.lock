@@ -355,6 +355,7 @@ llm = [
     { name = "pydantic-ai" },
 ]
 web = [
+    { name = "dill" },
     { name = "flask" },
     { name = "flask-cors" },
     { name = "flask-sqlalchemy" },
@@ -370,6 +371,7 @@ requires-dist = [
     { name = "click" },
     { name = "coverage", marker = "extra == 'dev'" },
     { name = "coveralls", marker = "extra == 'dev'" },
+    { name = "dill", marker = "extra == 'web'" },
     { name = "fastparquet", marker = "extra == 'gym'" },
     { name = "flask", marker = "extra == 'web'" },
     { name = "flask-cors", marker = "extra == 'web'" },
@@ -862,6 +864,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/43/c4/60b6068e703c78656d07b249919754f8f60e9e7da3325560574ee27b4e39/cyclopts-4.4.4.tar.gz", hash = "sha256:f30c591c971d974ab4f223e099f881668daed72de713713c984ca41479d393dd", size = 160046, upload-time = "2026-01-05T03:40:18.438Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/20/5b/0eceb9a5990de9025733a0d212ca43649ba9facd58b8552b6bf93c11439d/cyclopts-4.4.4-py3-none-any.whl", hash = "sha256:316f798fe2f2a30cb70e7140cfde2a46617bfbb575d31bbfdc0b2410a447bd83", size = 197398, upload-time = "2026-01-05T03:40:17.141Z" },
+]
+
+[[package]]
+name = "dill"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/80/630b4b88364e9a8c8c5797f4602d0f76ef820909ee32f0bacb9f90654042/dill-0.4.0.tar.gz", hash = "sha256:0633f1d2df477324f53a895b02c901fb961bdbf65a17122586ea7019292cbcf0", size = 186976, upload-time = "2025-04-16T00:41:48.867Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/50/3d/9373ad9c56321fdab5b41197068e1d8c25883b3fea29dd361f9b55116869/dill-0.4.0-py3-none-any.whl", hash = "sha256:44f54bf6412c2c8464c14e8243eb163690a9800dbe2c367330883b19c7561049", size = 119668, upload-time = "2025-04-16T00:41:47.671Z" },
 ]
 
 [[package]]

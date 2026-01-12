@@ -9,7 +9,7 @@ This module provides:
 from dataclasses import dataclass
 from typing import Optional, List, Literal, Any
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, UsageLimits, ToolDefinition, ModelSettings
 
 from catanatron.game import Game
 from catanatron.models.player import Player, Color
@@ -61,6 +61,7 @@ CATAN_SYSTEM_PROMPT = """You are an expert Settlers of Catan player. Your goal i
 - Balance between expansion and resource accumulation
 
 ## Decision Making
+Every turn use the get_game_and_action_analysis tool exactly onceto get a comprehensive analysis of the game state and available actions.
 Use the available tools to analyze the game state before making decisions.
 Consider both immediate gains and long-term strategy.
 If a strategy advisor recommendation is provided, consider it but you may choose differently based on your analysis.
@@ -88,6 +89,8 @@ class BaseLLMPlayer(Player):
         color: Color,
         model: str = "anthropic:claude-sonnet-4-20250514",
         output_mode: Literal["index", "structured"] = "index",
+        timeout: Optional[float] = 10.0,
+        tool_calls_limit: int = 10,
         **strategy_kwargs,
     ):
         """
@@ -97,6 +100,9 @@ class BaseLLMPlayer(Player):
             color: Player color
             model: PydanticAI model string (e.g., "anthropic:claude-sonnet-4-20250514", "openai:gpt-4o")
             output_mode: "index" for fast mode, "structured" for detailed action types
+            timeout: Timeout in seconds for LLM calls (default: 10.0)
+            tool_calls_limit: Overall tool call limit per decision (default: 10)
+            tool_call_limit_per_tool: Maximum calls per individual tool (default: 2)
             **strategy_kwargs: Arguments passed to parent strategy player (e.g., depth for AlphaBeta)
         """
         # Initialize parent player(s)
@@ -104,6 +110,8 @@ class BaseLLMPlayer(Player):
 
         self.model = model
         self.output_mode = output_mode
+        self.timeout = timeout
+        self.tool_calls_limit = tool_calls_limit
         self.history_manager = ConversationHistoryManager()
 
         # Create the agent - defer to allow subclasses to customize
@@ -119,6 +127,7 @@ class BaseLLMPlayer(Player):
             deps_type=CatanDependencies,
             output_type=ActionByIndex,
             system_prompt=CATAN_SYSTEM_PROMPT,
+            tool_timeout=self.timeout,
         )
 
         # Register all tools
@@ -205,6 +214,13 @@ class BaseLLMPlayer(Player):
 
         return "\n".join(prompt_parts)
 
+    def _filter_out_tools_by_name(
+        ctx: RunContext[bool], tool_defs: list[ToolDefinition]
+    ) -> list[ToolDefinition] | None:
+        if ctx.deps:
+            return [tool_def for tool_def in tool_defs if tool_def.name != 'launch_potato']
+        return tool_defs
+
     def _resolve_action(
         self, output: ActionByIndex, playable_actions: List[Action]
     ) -> Action:
@@ -258,12 +274,21 @@ class BaseLLMPlayer(Player):
             == game.state.color_to_index[self.color],
         )
 
-        # 4. Run agent with history
+        # 4. Run agent with history and timeout
         try:
+            # Configure model settings with timeout for the entire run
+            model_settings = None
+            if self.timeout is not None and self.timeout > 0:
+                model_settings = ModelSettings(timeout=self.timeout)
+            
             result = self.agent.run_sync(
                 self._build_prompt(game),
                 deps=deps,
                 message_history=self.history_manager.get_messages(),
+                usage_limits=UsageLimits(
+                    tool_calls_limit=self.tool_calls_limit,
+                ),
+                model_settings=model_settings,
             )
 
             # 5. Update history
@@ -274,8 +299,18 @@ class BaseLLMPlayer(Player):
             logfire.info(f"LLM player {self.color} chose action {action.action_type}", turn_number=current_turn)
             return action
 
+        except TimeoutError as e:
+            # Timeout occurred - fall back to strategy recommendation
+            logfire.warning(
+                f"LLM player {self.color} timed out after {self.timeout}s",
+                turn_number=current_turn,
+                error=str(e)
+            )
+            if recommendation is not None:
+                return recommendation
+            return playable_actions[0]
         except Exception as e:
-            # On any error, fall back to strategy recommendation or first action
+            # On any other error (including UsageLimitExceeded), fall back to strategy recommendation or first action
             logfire.error(f"LLM player {self.color} error: {e}", turn_number=current_turn)
             if recommendation is not None:
                 return recommendation
@@ -285,3 +320,27 @@ class BaseLLMPlayer(Player):
         """Reset state between games."""
         super().reset_state()
         self.history_manager.clear()
+
+    def __getstate__(self):
+        """
+        Custom pickle serialization.
+        
+        Exclude unpickleable objects (agent, history_manager) that contain
+        SSLContext, thread locks, and other non-serializable components.
+        """
+        state = self.__dict__.copy()
+        # Remove unpickleable objects
+        state.pop('agent', None)
+        state.pop('history_manager', None)
+        return state
+
+    def __setstate__(self, state):
+        """
+        Custom pickle deserialization.
+        
+        Recreate unpickleable objects after deserialization.
+        """
+        self.__dict__.update(state)
+        # Recreate the agent and history manager
+        self.history_manager = ConversationHistoryManager()
+        self.agent = self._create_agent()

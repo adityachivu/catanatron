@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal, Union
 
 import click
+import uuid
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, BarColumn, TimeRemainingColumn
@@ -258,6 +259,7 @@ def play_batch_core(num_games, players, game_config, accumulators=[]):
             "catanatron.play_game",
             game_number=game_num + 1,
             total_games=num_games,
+            game_uuid=uuid.uuid4(),
             map_type=game_config.catan_map,
         ):
             for player in players:

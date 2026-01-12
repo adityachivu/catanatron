@@ -43,28 +43,40 @@ def register_tools(agent: Agent) -> None:
         agent: The PydanticAI agent to register tools on
     """
 
-    @agent.tool
-    def get_game_state(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+    @agent.tool()
+    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
         """
-        Get comprehensive current game state including your resources,
-        buildings, opponents, and board information.
+        Combine the analysis of the board into a single analysis.
+        """
 
-        Use this to understand the overall game situation before making decisions.
-        """
-        return StateFormatter.format_full_state(ctx.deps.game, ctx.deps.color)
+        full_analysis = {
+            "game_state": StateFormatter.format_full_state(ctx.deps.game, ctx.deps.color),
+            "available_actions": [StateFormatter.format_action(action, i) for i, action in enumerate(ctx.deps.playable_actions)],
+        }
+        return full_analysis
 
-    @agent.tool
-    def get_available_actions(ctx: RunContext[CatanDependencies]) -> List[Dict[str, Any]]:
-        """
-        Get list of all valid actions you can take right now.
+    # @agent.tool
+    # def get_game_state(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+    #     """
+    #     Get comprehensive current game state including your resources,
+    #     buildings, opponents, and board information.
 
-        Each action has an index, type, and description.
-        Return the index of your chosen action.
-        """
-        actions = []
-        for i, action in enumerate(ctx.deps.playable_actions):
-            actions.append(StateFormatter.format_action(action, i))
-        return actions
+    #     Use this to understand the overall game situation before making decisions.
+    #     """
+    #     return StateFormatter.format_full_state(ctx.deps.game, ctx.deps.color)
+
+    # @agent.tool
+    # def get_available_actions(ctx: RunContext[CatanDependencies]) -> List[Dict[str, Any]]:
+    #     """
+    #     Get list of all valid actions you can take right now.
+
+    #     Each action has an index, type, and description.
+    #     Return the index of your chosen action.
+    #     """
+    #     actions = []
+    #     for i, action in enumerate(ctx.deps.playable_actions):
+    #         actions.append(StateFormatter.format_action(action, i))
+    #     return actions
 
     # @agent.tool
     # def get_strategy_recommendation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
