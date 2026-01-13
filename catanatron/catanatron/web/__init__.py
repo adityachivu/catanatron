@@ -1,5 +1,12 @@
 import os
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, skip loading
+
 from flask import Flask
 from flask_cors import CORS
 

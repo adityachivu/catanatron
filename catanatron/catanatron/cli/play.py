@@ -12,6 +12,13 @@ from rich import box
 from rich.theme import Theme
 from rich.text import Text
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, skip loading
+
 from catanatron.game import Game
 from catanatron.models.player import Color
 from catanatron.models.map import build_map
