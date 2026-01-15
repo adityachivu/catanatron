@@ -38,6 +38,7 @@ llm = [
     "openai>=1.50.0",
     "pydantic-ai>=1.41.0",
     "logfire>=4.17.0",
+    "tenacity>=9.1.2",
 ]
 dev = [
     "black",
@@ -57,5 +58,3 @@ catanatron-play = "catanatron.cli.play:simulate"
 
 [tool.setuptools.packages.find]
 where = ["catanatron"]
-
-

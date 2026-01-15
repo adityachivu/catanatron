@@ -353,6 +353,7 @@ llm = [
     { name = "logfire" },
     { name = "openai" },
     { name = "pydantic-ai" },
+    { name = "tenacity" },
 ]
 web = [
     { name = "dill" },
@@ -390,6 +391,7 @@ requires-dist = [
     { name = "pytest-watch", marker = "extra == 'dev'" },
     { name = "rich" },
     { name = "sqlalchemy", marker = "extra == 'web'" },
+    { name = "tenacity", marker = "extra == 'llm'", specifier = ">=9.1.2" },
 ]
 provides-extras = ["gym", "web", "llm", "dev"]
 
