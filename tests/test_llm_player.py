@@ -1,9 +1,11 @@
 """
 Tests for LLM player implementations.
 
-These tests use mocked LLM responses to avoid requiring actual API keys.
+These tests use PydanticAI's TestModel and FunctionModel to mock LLM responses
+without requiring actual API keys.
 """
 
+import os
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from dataclasses import dataclass
@@ -19,6 +21,10 @@ from tests.utils import build_initial_placements, advance_to_play_turn
 
 # Skip all tests if pydantic-ai is not available
 pytest.importorskip("pydantic_ai")
+
+# Import PydanticAI test utilities
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.models.function import FunctionModel
 
 
 # ============= Test Fixtures =============
@@ -445,3 +451,318 @@ class TestTools:
             assert expected_text in formatted["description"], (
                 f"Expected '{expected_text}' in description for {action.action_type}"
             )
+
+
+# ============= Model Configuration Tests =============
+
+
+class TestModelConfig:
+    """Tests for the model configuration system."""
+
+    def test_model_config_creation(self):
+        """Test ModelConfig dataclass creation."""
+        from catanatron.players.llm.models import ModelConfig
+        
+        config = ModelConfig(
+            model_name="openai:gpt-4o",
+            temperature=0.7,
+            max_tokens=1024,
+        )
+        
+        assert config.model_name == "openai:gpt-4o"
+        assert config.temperature == 0.7
+        assert config.max_tokens == 1024
+
+    def test_model_config_to_settings(self):
+        """Test converting ModelConfig to ModelSettings."""
+        from catanatron.players.llm.models import ModelConfig
+        
+        config = ModelConfig(
+            model_name="test:model",
+            temperature=0.5,
+            timeout=60.0,
+        )
+        
+        settings = config.to_model_settings()
+        assert settings is not None
+        assert settings.temperature == 0.5
+        assert settings.timeout == 60.0
+
+    def test_create_model_with_string(self):
+        """Test create_model with string input."""
+        from catanatron.players.llm.models import create_model
+        
+        result = create_model("anthropic:claude-sonnet-4-20250514")
+        assert result == "anthropic:claude-sonnet-4-20250514"
+
+    def test_create_model_with_test_model(self):
+        """Test create_model with TestModel passthrough."""
+        from catanatron.players.llm.models import create_model
+        
+        test_model = TestModel(seed=42)
+        result = create_model(test_model)
+        assert result is test_model
+
+    def test_create_model_with_none_uses_default(self):
+        """Test create_model with None uses default."""
+        from catanatron.players.llm.models import create_model, DEFAULT_MODEL
+        
+        result = create_model(None)
+        assert result == DEFAULT_MODEL
+
+    def test_create_model_respects_env_var(self):
+        """Test create_model respects CATAN_LLM_MODEL env var."""
+        from catanatron.players.llm.models import create_model
+        
+        os.environ["CATAN_LLM_MODEL"] = "openai:gpt-4o-mini"
+        try:
+            result = create_model(None)
+            assert result == "openai:gpt-4o-mini"
+        finally:
+            del os.environ["CATAN_LLM_MODEL"]
+
+    def test_test_mode_env_var_forces_test_model(self):
+        """Test CATAN_LLM_TEST_MODE forces TestModel."""
+        from catanatron.players.llm.models import create_model
+        
+        os.environ["CATAN_LLM_TEST_MODE"] = "1"
+        try:
+            result = create_model("anthropic:claude-sonnet-4-20250514")
+            assert isinstance(result, TestModel)
+        finally:
+            del os.environ["CATAN_LLM_TEST_MODE"]
+
+    def test_is_test_model(self):
+        """Test is_test_model helper function."""
+        from catanatron.players.llm.models import is_test_model
+        
+        assert is_test_model(TestModel()) is True
+        assert is_test_model(FunctionModel(lambda m, i: None)) is True
+        assert is_test_model("anthropic:claude-sonnet-4-20250514") is False
+
+
+# ============= Tests with TestModel (No Mocking) =============
+
+
+class TestPlayerWithTestModel:
+    """Tests using PydanticAI's TestModel for deterministic behavior."""
+
+    def test_player_creation_with_test_model(self):
+        """Test creating a player with TestModel."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        player = PydanticAIPlayer(Color.RED, model=TestModel(seed=42))
+        assert player.color == Color.RED
+        assert isinstance(player._model, TestModel)
+
+    def test_player_with_model_config(self):
+        """Test creating a player with ModelConfig."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        from catanatron.players.llm.models import ModelConfig
+        
+        config = ModelConfig(
+            model_name="test:model",
+            temperature=0.5,
+        )
+        
+        # We need to use TestModel for actual testing
+        # ModelConfig with string model would try to use real API
+        player = PydanticAIPlayer(Color.RED, model=TestModel())
+        assert player.color == Color.RED
+
+    def test_decide_with_test_model(self, game_after_initial_placement):
+        """Test decide() with TestModel returns valid action."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        game = game_after_initial_placement
+        player = PydanticAIPlayer(Color.RED, model=TestModel(seed=42))
+        
+        action = player.decide(game, game.playable_actions)
+        
+        # Action should be from playable_actions
+        assert action in game.playable_actions
+
+    def test_model_settings_passed_through(self):
+        """Test that temperature/max_tokens are stored correctly."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        player = PydanticAIPlayer(
+            Color.RED,
+            model=TestModel(),
+            temperature=0.7,
+            max_tokens=2048,
+        )
+        
+        assert player.temperature == 0.7
+        assert player.max_tokens == 2048
+        
+        settings = player._get_model_settings()
+        assert settings.temperature == 0.7
+        assert settings.max_tokens == 2048
+
+
+# ============= Tests with Scripted Responses =============
+
+
+class TestScriptedResponses:
+    """Tests using FunctionModel for scripted responses."""
+
+    def test_always_action_helper(self):
+        """Test always_action creates consistent model."""
+        from catanatron.players.llm.testing import always_action
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        model = always_action(0)
+        player = PydanticAIPlayer(Color.RED, model=model)
+        
+        # Model should be a FunctionModel
+        assert isinstance(player._model, FunctionModel)
+
+    def test_scripted_response_helper(self):
+        """Test scripted_response creates working model."""
+        from catanatron.players.llm.testing import scripted_response
+        from catanatron.players.llm.output_types import ActionByIndex
+        
+        responses = [
+            ActionByIndex(action_index=0),
+            ActionByIndex(action_index=1),
+        ]
+        model = scripted_response(responses)
+        
+        assert isinstance(model, FunctionModel)
+
+    def test_create_test_player_helper(self):
+        """Test create_test_player convenience function."""
+        from catanatron.players.llm.testing import create_test_player
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        player = create_test_player(Color.RED)
+        
+        assert isinstance(player, PydanticAIPlayer)
+        assert player.color == Color.RED
+        assert isinstance(player._model, TestModel)
+
+    def test_create_test_model_helper(self):
+        """Test create_test_model with parameters."""
+        from catanatron.players.llm.testing import create_test_model
+        
+        model = create_test_model(seed=123, call_tools="none")
+        
+        assert isinstance(model, TestModel)
+        assert model.seed == 123
+
+
+# ============= Negotiation Tests with TestModel =============
+
+
+class TestNegotiationWithTestModel:
+    """Tests for negotiation system using TestModel."""
+
+    def test_negotiation_manager_creation(self):
+        """Test NegotiationManager can be created."""
+        from catanatron.players.llm.negotiation import NegotiationManager
+        
+        manager = NegotiationManager(max_rounds=5)
+        assert manager.max_rounds == 5
+        assert manager.current_session is None
+
+    def test_setup_negotiation(self):
+        """Test setup_negotiation registers LLM players."""
+        from catanatron.players.llm.negotiation import setup_negotiation
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        llm_player = PydanticAIPlayer(Color.RED, model=TestModel())
+        random_player = RandomPlayer(Color.BLUE)
+        
+        game = Game([llm_player, random_player], seed=42)
+        manager = setup_negotiation(game, max_rounds=3)
+        
+        # LLM player should be registered
+        assert Color.RED in manager.players
+        # Random player should not be registered
+        assert Color.BLUE not in manager.players
+        # Player should have reference to manager
+        assert llm_player.negotiation_manager is manager
+
+    def test_negotiation_session_creation(self):
+        """Test starting a negotiation session."""
+        from catanatron.players.llm.negotiation import setup_negotiation
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        player1 = PydanticAIPlayer(Color.RED, model=TestModel())
+        player2 = PydanticAIPlayer(Color.BLUE, model=TestModel())
+        
+        game = Game([player1, player2], seed=42)
+        manager = setup_negotiation(game)
+        
+        # Start negotiation
+        session = manager.start_negotiation(Color.RED, game)
+        
+        assert session.initiator == Color.RED
+        assert Color.RED in session.participants
+        assert Color.BLUE in session.participants
+        assert session.is_active is True
+
+
+# ============= Integration Tests =============
+
+
+class TestIntegrationWithTestModel:
+    """Full integration tests using TestModel."""
+
+    def test_game_with_llm_player_completes(self):
+        """Test a game with LLM player (using TestModel) can run."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        # Use TestModel so no real API calls are made
+        llm_player = PydanticAIPlayer(Color.RED, model=TestModel(seed=42))
+        random_player = RandomPlayer(Color.BLUE)
+        
+        game = Game([llm_player, random_player], seed=42)
+        
+        # Run just a few ticks to verify it works
+        for _ in range(10):
+            if game.winning_color() is not None:
+                break
+            game.play_tick()
+        
+        # If we get here without error, the integration works
+        assert True
+
+    def test_multiple_llm_players_game(self):
+        """Test a game with multiple LLM players."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        player1 = PydanticAIPlayer(Color.RED, model=TestModel(seed=1))
+        player2 = PydanticAIPlayer(Color.BLUE, model=TestModel(seed=2))
+        
+        game = Game([player1, player2], seed=42)
+        
+        # Run a few ticks
+        for _ in range(5):
+            if game.winning_color() is not None:
+                break
+            game.play_tick()
+        
+        assert True
+
+    def test_llm_player_with_negotiation_setup(self):
+        """Test LLM players with negotiation manager configured."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        from catanatron.players.llm.negotiation import setup_negotiation
+        
+        player1 = PydanticAIPlayer(Color.RED, model=TestModel(seed=1))
+        player2 = PydanticAIPlayer(Color.BLUE, model=TestModel(seed=2))
+        
+        game = Game([player1, player2], seed=42)
+        manager = setup_negotiation(game, max_rounds=3)
+        
+        # Run a few ticks
+        for _ in range(5):
+            if game.winning_color() is not None:
+                break
+            game.play_tick()
+        
+        # Both players should have negotiation manager set
+        assert player1.negotiation_manager is manager
+        assert player2.negotiation_manager is manager

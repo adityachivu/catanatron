@@ -10,9 +10,10 @@ based on game state (e.g., trade tools only available after rolling).
 """
 
 from dataclasses import dataclass
-from typing import Optional, List, Literal, Any, TYPE_CHECKING
+from typing import Optional, List, Literal, Any, Union, TYPE_CHECKING
 
 from pydantic_ai import Agent, UsageLimits, ModelSettings, Tool
+from pydantic_ai.models import Model
 
 from catanatron.game import Game
 from catanatron.models.player import Player, Color
@@ -20,6 +21,7 @@ from catanatron.models.enums import Action, ActionPrompt
 
 from catanatron.players.llm.output_types import ActionByIndex
 from catanatron.players.llm.history import ConversationHistoryManager
+from catanatron.players.llm.models import create_model, ModelConfig, ModelInput
 from catanatron.state_functions import player_has_rolled
 
 import logfire
@@ -107,11 +109,14 @@ class BaseLLMPlayer(Player):
     def __init__(
         self,
         color: Color,
-        model: str = "anthropic:claude-sonnet-4-20250514",
+        model: ModelInput = None,
         output_mode: Literal["index", "structured"] = "index",
         timeout: Optional[float] = 120.0,
         tool_calls_limit: int = 10,
         is_bot: bool = True,
+        # Model settings (applied at run time)
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         **strategy_kwargs,
     ):
         """
@@ -119,11 +124,17 @@ class BaseLLMPlayer(Player):
 
         Args:
             color: Player color
-            model: PydanticAI model string (e.g., "anthropic:claude-sonnet-4-20250514", "openai:gpt-4o")
+            model: Model configuration. Can be:
+                - str: Model identifier (e.g., "anthropic:claude-sonnet-4-20250514", "openai:gpt-4o")
+                - Model: Pre-configured Model instance (including TestModel, FunctionModel)
+                - ModelConfig: Configuration dataclass with model name and settings
+                - None: Use CATAN_LLM_MODEL env var or default
             output_mode: "index" for fast mode, "structured" for detailed action types
             timeout: Timeout in seconds for LLM calls (default: 120.0)
             tool_calls_limit: Overall tool call limit per decision (default: 10)
             is_bot: Whether this is a bot player (default: True)
+            temperature: Sampling temperature for the model (0.0-1.0+)
+            max_tokens: Maximum tokens to generate
             **strategy_kwargs: Arguments passed to parent strategy player (e.g., depth for AlphaBeta)
         """
         # Initialize parent player(s)
@@ -134,9 +145,16 @@ class BaseLLMPlayer(Player):
         # Set is_bot after parent chain init (Player sets it, strategy players may not)
         self.is_bot = is_bot
 
-        self.model = model
-        self.output_mode = output_mode
+        # Create model using factory - handles str, Model, ModelConfig, None
+        self._model = create_model(model)
+        self._model_config = model if isinstance(model, ModelConfig) else None
+        
+        # Store model settings for run_sync()
         self.timeout = timeout
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        
+        self.output_mode = output_mode
         self.tool_calls_limit = tool_calls_limit
         self.history_manager = ConversationHistoryManager()
         
@@ -148,6 +166,18 @@ class BaseLLMPlayer(Player):
 
         # Create the agent - defer to allow subclasses to customize
         self.agent = self._create_agent()
+    
+    @property
+    def model(self) -> Union[Model, str]:
+        """Get the configured model (for backward compatibility)."""
+        return self._model
+    
+    @model.setter
+    def model(self, value: ModelInput) -> None:
+        """Set the model (recreates the agent)."""
+        self._model = create_model(value)
+        self._model_config = value if isinstance(value, ModelConfig) else None
+        self.agent = self._create_agent()
 
     def _create_agent(self) -> Agent:
         """
@@ -158,14 +188,52 @@ class BaseLLMPlayer(Player):
         """
         # Use index-based output for simplicity and reliability
         agent = Agent(
-            self.model,
+            self._model,  # Can be string or Model instance
             deps_type=CatanDependencies,
             output_type=ActionByIndex,
             system_prompt=CATAN_SYSTEM_PROMPT,
-            tool_timeout=self.timeout,
         )
 
         return agent
+    
+    def _get_model_settings(self) -> Optional[ModelSettings]:
+        """
+        Build ModelSettings from configuration.
+        
+        Combines settings from:
+        1. ModelConfig (if provided)
+        2. Instance-level settings (temperature, max_tokens, timeout)
+        
+        Instance-level settings override ModelConfig settings.
+        
+        Returns:
+            ModelSettings instance if any settings are configured, None otherwise.
+        """
+        settings = {}
+        
+        # Start with ModelConfig settings if available
+        if self._model_config:
+            config_settings = self._model_config.to_model_settings()
+            if config_settings:
+                # Convert to dict for merging
+                settings = {
+                    k: v for k, v in {
+                        "temperature": getattr(config_settings, "temperature", None),
+                        "max_tokens": getattr(config_settings, "max_tokens", None),
+                        "top_p": getattr(config_settings, "top_p", None),
+                        "timeout": getattr(config_settings, "timeout", None),
+                    }.items() if v is not None
+                }
+        
+        # Override with instance-level settings
+        if self.timeout is not None:
+            settings["timeout"] = self.timeout
+        if self.temperature is not None:
+            settings["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            settings["max_tokens"] = self.max_tokens
+        
+        return ModelSettings(**settings) if settings else None
     
     def _select_tools(self, game: Game) -> List[Tool]:
         """
@@ -424,12 +492,10 @@ class BaseLLMPlayer(Player):
         # 5. Select appropriate tools based on game state
         tools = self._select_tools(game)
 
-        # 6. Run agent with history, tools, and timeout
+        # 6. Run agent with history, tools, and model settings
         try:
-            # Configure model settings with timeout for the entire run
-            model_settings = None
-            if self.timeout is not None and self.timeout > 0:
-                model_settings = ModelSettings(timeout=self.timeout)
+            # Get model settings (temperature, max_tokens, timeout, etc.)
+            model_settings = self._get_model_settings()
             
             result = self.agent.run_sync(
                 self._build_prompt(game),
@@ -471,10 +537,11 @@ class BaseLLMPlayer(Player):
         except Exception as e:
             # On any other error (including UsageLimitExceeded), fall back to strategy recommendation or first action
             logfire.error(f"LLM player {self.color} error: {e}", turn_number=current_turn)
-        finally:
-            if recommendation is not None:
-                return recommendation
-            return playable_actions[0]
+        
+        # Fallback for exception cases
+        if recommendation is not None:
+            return recommendation
+        return playable_actions[0]
 
     def reset_state(self):
         """Reset state between games."""
@@ -498,6 +565,10 @@ class BaseLLMPlayer(Player):
         state.pop('negotiation_manager', None)
         state.pop('negotiation_history', None)
         state.pop('_pending_trade_action', None)
+        # Model instances (TestModel, FunctionModel) may not be pickleable
+        # Store only if it's a string
+        if not isinstance(state.get('_model'), str):
+            state['_model'] = None  # Will use default on deserialize
         return state
 
     def __setstate__(self, state):
@@ -507,6 +578,9 @@ class BaseLLMPlayer(Player):
         Recreate unpickleable objects after deserialization.
         """
         self.__dict__.update(state)
+        # Recreate model if not preserved
+        if self._model is None:
+            self._model = create_model(None)
         # Recreate the agent and history manager
         self.history_manager = ConversationHistoryManager()
         self.agent = self._create_agent()

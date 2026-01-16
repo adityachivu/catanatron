@@ -3,6 +3,22 @@ Concrete LLM-powered player implementations.
 
 Provides ready-to-use player classes that combine LLM decision making
 with various strategy advisors (AlphaBeta, MCTS, Value Function).
+
+Model Configuration:
+    All player classes accept flexible model configuration:
+    
+        from pydantic_ai.models.test import TestModel
+        from catanatron.players.llm import ModelConfig
+        
+        # String shorthand
+        player = PydanticAIPlayer(Color.RED, model="openai:gpt-4o")
+        
+        # Direct TestModel for testing
+        player = PydanticAIPlayer(Color.RED, model=TestModel())
+        
+        # ModelConfig for full control
+        config = ModelConfig(model_name="openai:gpt-4o", temperature=0.7)
+        player = PydanticAIPlayer(Color.RED, model=config)
 """
 
 from typing import Literal, Optional, List
@@ -12,6 +28,7 @@ from catanatron.models.player import Color
 from catanatron.models.enums import Action
 
 from catanatron.players.llm.base import BaseLLMPlayer
+from catanatron.players.llm.models import ModelInput
 from catanatron.players.minimax import AlphaBetaPlayer
 from catanatron.players.mcts import MCTSPlayer
 from catanatron.players.value import ValueFunctionPlayer
@@ -25,26 +42,42 @@ class PydanticAIPlayer(BaseLLMPlayer):
     Good for testing pure LLM capabilities or when you want maximum flexibility.
 
     Example:
+        # With model string
         player = PydanticAIPlayer(Color.RED, model="anthropic:claude-sonnet-4-20250514")
+        
+        # With TestModel for testing
+        from pydantic_ai.models.test import TestModel
+        player = PydanticAIPlayer(Color.RED, model=TestModel())
     """
 
     def __init__(
         self,
         color: Color,
-        model: str = "anthropic:claude-sonnet-4-20250514",
+        model: ModelInput = None,
         output_mode: Literal["index", "structured"] = "index",
         is_bot: bool = True,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         """
         Initialize a pure LLM player.
 
         Args:
             color: Player color
-            model: LLM model string (e.g., "anthropic:claude-sonnet-4-20250514", "openai:gpt-4o")
+            model: Model configuration. Can be str, Model instance, ModelConfig, or None
             output_mode: "index" for fast mode, "structured" for detailed logging
             is_bot: Whether this is a bot player (always True for LLM)
+            temperature: Sampling temperature for the model
+            max_tokens: Maximum tokens to generate
         """
-        super().__init__(color, model=model, output_mode=output_mode, is_bot=is_bot)
+        super().__init__(
+            color,
+            model=model,
+            output_mode=output_mode,
+            is_bot=is_bot,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     def _get_strategy_recommendation(
         self, game: Game, playable_actions: List[Action]
@@ -75,26 +108,30 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer, AlphaBetaPlayer):
     def __init__(
         self,
         color: Color,
-        model: str = "anthropic:claude-sonnet-4-20250514",
+        model: ModelInput = None,
         depth: int = 2,
         prunning: bool = False,
         timeout: Optional[float] = 120.0,
         tool_calls_limit: int = 10,
         output_mode: Literal["index", "structured"] = "index",
         is_bot: bool = True,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         """
         Initialize an LLM player with AlphaBeta advisor.
 
         Args:
             color: Player color
-            model: LLM model string
+            model: Model configuration (str, Model, ModelConfig, or None)
             depth: Search depth for AlphaBeta (higher = slower but better recommendations)
             prunning: Whether to use alpha-beta pruning
             timeout: Timeout in seconds for LLM calls (default: 120.0)
             tool_calls_limit: Overall tool call limit per decision (default: 10)
             output_mode: Action output format
             is_bot: Whether this is a bot player
+            temperature: Sampling temperature for the model
+            max_tokens: Maximum tokens to generate
         """
         # Initialize AlphaBeta first (it will call Player.__init__)
         super().__init__(
@@ -104,6 +141,8 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer, AlphaBetaPlayer):
             is_bot=is_bot,
             timeout=timeout,
             tool_calls_limit=tool_calls_limit,
+            temperature=temperature,
+            max_tokens=max_tokens,
             depth=depth,
             prunning=prunning,
         )
@@ -133,26 +172,30 @@ class LLMMCTSPlayer(BaseLLMPlayer, MCTSPlayer):
     def __init__(
         self,
         color: Color,
-        model: str = "anthropic:claude-sonnet-4-20250514",
+        model: ModelInput = None,
         num_simulations: int = 10,
         prunning: bool = False,
         timeout: Optional[float] = 120.0,
         tool_calls_limit: int = 10,
         output_mode: Literal["index", "structured"] = "index",
         is_bot: bool = True,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         """
         Initialize an LLM player with MCTS advisor.
 
         Args:
             color: Player color
-            model: LLM model string
+            model: Model configuration (str, Model, ModelConfig, or None)
             num_simulations: Number of MCTS simulations (higher = slower but better)
             prunning: Whether to use action pruning
             timeout: Timeout in seconds for LLM calls (default: 120.0)
             tool_calls_limit: Overall tool call limit per decision (default: 10)
             output_mode: Action output format
             is_bot: Whether this is a bot player
+            temperature: Sampling temperature for the model
+            max_tokens: Maximum tokens to generate
         """
         # Initialize MCTS first
         super().__init__(
@@ -162,6 +205,8 @@ class LLMMCTSPlayer(BaseLLMPlayer, MCTSPlayer):
             is_bot=is_bot,
             timeout=timeout,
             tool_calls_limit=tool_calls_limit,
+            temperature=temperature,
+            max_tokens=max_tokens,
             num_simulations=num_simulations,
             prunning=prunning,
         )
@@ -188,24 +233,28 @@ class LLMValuePlayer(BaseLLMPlayer, ValueFunctionPlayer):
     def __init__(
         self,
         color: Color,
-        model: str = "anthropic:claude-sonnet-4-20250514",
+        model: ModelInput = None,
         value_fn_builder_name: Optional[str] = None,
         output_mode: Literal["index", "structured"] = "index",
         timeout: Optional[float] = 120.0,
         tool_calls_limit: int = 10,
         is_bot: bool = True,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ):
         """
         Initialize an LLM player with Value Function advisor.
 
         Args:
             color: Player color
-            model: LLM model string
+            model: Model configuration (str, Model, ModelConfig, or None)
             value_fn_builder_name: Which value function to use ("C" for contender, None for base)
             output_mode: Action output format
             timeout: Timeout in seconds for LLM calls (default: 120.0)
             tool_calls_limit: Overall tool call limit per decision (default: 10)
             is_bot: Whether this is a bot player
+            temperature: Sampling temperature for the model
+            max_tokens: Maximum tokens to generate
         """
         # Initialize ValueFunctionPlayer first
         super().__init__(
@@ -215,6 +264,8 @@ class LLMValuePlayer(BaseLLMPlayer, ValueFunctionPlayer):
             is_bot=is_bot,
             timeout=timeout,
             tool_calls_limit=tool_calls_limit,
+            temperature=temperature,
+            max_tokens=max_tokens,
             value_fn_builder_name=value_fn_builder_name,
         )
 
