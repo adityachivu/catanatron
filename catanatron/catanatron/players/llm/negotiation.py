@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Any, TYPE_CHECKING
 import time
 
+import logfire
 from pydantic_ai import RunContext, UsageLimits
 
 from catanatron.game import Game
@@ -275,8 +276,21 @@ class NegotiationManager:
             game=game,
         )
         
-        # Run the negotiation loop
-        trade_action = self._run_negotiation_loop(game)
+        # Run the negotiation loop with logfire span
+        with logfire.span(
+            "catanatron.negotiation_session",
+            initiator=initiator.value,
+            participants=[c.value for c in participants],
+            turn_number=turn,
+            max_rounds=self.max_rounds,
+        ) as span:
+            trade_action = self._run_negotiation_loop(game)
+            
+            # Set final attributes
+            if self.current_session:
+                span.set_attribute("messages_count", len(self.current_session.messages))
+                span.set_attribute("final_round", self.current_session.current_round)
+            span.set_attribute("resulted_in_trade", trade_action is not None)
         
         # End the session and distribute history
         self._end_negotiation()
@@ -369,7 +383,6 @@ class NegotiationManager:
                 
             except Exception as e:
                 # Log error but continue negotiation
-                import logfire
                 logfire.error(
                     f"Negotiation error for {current_color}: {e}",
                     color=current_color.value

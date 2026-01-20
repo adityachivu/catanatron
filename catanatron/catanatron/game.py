@@ -5,7 +5,9 @@ Contains Game class which is a thin-wrapper around the State class.
 import uuid
 import random
 import sys
-from typing import Sequence, Union, Optional
+from typing import Sequence, Union, Optional, List
+
+import logfire
 
 from catanatron.models.actions import generate_playable_actions
 from catanatron.models.enums import Action, ActionPrompt, ActionRecord, ActionType
@@ -111,6 +113,11 @@ class Game:
             catan_map (CatanMap, optional): Map to use. Defaults to None.
             initialize (bool, optional): Whether to initialize. Defaults to True.
         """
+        # Initialize turn span tracking (always, for consistency)
+        self._current_turn_span = None
+        self._current_turn_start_index = None
+        self._current_turn_actions: List[str] = []
+
         if initialize:
             self.seed = seed if seed is not None else random.randrange(sys.maxsize)
             random.seed(self.seed)
@@ -137,9 +144,38 @@ class Game:
             accumulator.before(self)
         while self.winning_color() is None and self.state.num_turns < TURNS_LIMIT:
             self.play_tick(decide_fn=decide_fn, accumulators=accumulators)
+        
+        # End any active turn span on game termination (e.g., if game ended mid-turn)
+        self._end_turn_span()
+        
         for accumulator in accumulators:
             accumulator.after(self)
         return self.winning_color()
+
+    def _start_turn_span(self):
+        """Start a new logfire span for the current player's turn."""
+        player = self.state.current_player()
+        self._current_turn_span = logfire.span(
+            "catanatron.player_turn",
+            player_color=player.color.value,
+            turn_number=self.state.num_turns,
+            player_index=self.state.current_turn_index,
+            game_id=self.id,
+        )
+        self._current_turn_span.__enter__()
+        self._current_turn_start_index = self.state.current_turn_index
+        self._current_turn_actions = []
+
+    def _end_turn_span(self):
+        """End the current turn span and record final attributes."""
+        if self._current_turn_span is not None:
+            # Set span attributes for actions taken
+            self._current_turn_span.set_attribute("num_actions", len(self._current_turn_actions))
+            self._current_turn_span.set_attribute("actions_taken", self._current_turn_actions)
+            self._current_turn_span.__exit__(None, None, None)
+            self._current_turn_span = None
+            self._current_turn_start_index = None
+            self._current_turn_actions = []
 
     def play_tick(self, decide_fn=None, accumulators=[]):
         """Advances game by one ply (player decision).
@@ -151,6 +187,15 @@ class Game:
         Returns:
             ActionRecord: representing the executed action
         """
+        # Check if we need to start a new turn span (skip during initial build phase)
+        if not self.state.is_initial_build_phase:
+            # Detect if this is a new turn (turn index changed or first turn after initial build)
+            if self._current_turn_start_index != self.state.current_turn_index:
+                # End any existing span from previous turn
+                self._end_turn_span()
+                # Start new span for this turn
+                self._start_turn_span()
+
         # Ask Player for action
         player = self.state.current_player()
         action = (
@@ -181,8 +226,17 @@ class Game:
                 f"{action} not playable right now. playable_actions={self.playable_actions}"
             )
 
+        # Track action in current turn span
+        if self._current_turn_span is not None:
+            self._current_turn_actions.append(action.action_type.name)
+
         action_record = apply_action(self.state, action, action_record)
         self.playable_actions = generate_playable_actions(self.state)
+
+        # End turn span when END_TURN action is executed
+        if action.action_type == ActionType.END_TURN:
+            self._end_turn_span()
+
         return action_record
 
     def winning_color(self) -> Union[Color, None]:

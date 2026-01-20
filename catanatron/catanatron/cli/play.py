@@ -271,6 +271,12 @@ def play_batch_core(num_games, players, game_config, accumulators=[]):
                 vps_to_win=game_config.vps_to_win,
                 catan_map=catan_map,
             )
+            from catanatron.players.llm.base import BaseLLMPlayer
+            from catanatron.players.llm.negotiation import setup_negotiation
+            manager = setup_negotiation(game, max_rounds=10)  # Must be called manually
+            for player in players:
+                if isinstance(player, BaseLLMPlayer):
+                    manager.register_player(player)
             game.play(accumulators)
             yield game
 
@@ -447,7 +453,7 @@ def play_batch(
     table.add_column("AVG DEV VP", justify="right")
     for player in players:
         vps = statistics_accumulator.results_by_player[player.color]
-        avg_vps = sum(vps) / len(vps)
+        avg_vps = sum(vps) / len(vps) if vps else 0.0
         avg_settlements = vp_accumulator.get_avg_settlements(player.color)
         avg_cities = vp_accumulator.get_avg_cities(player.color)
         avg_largest = vp_accumulator.get_avg_largest(player.color)

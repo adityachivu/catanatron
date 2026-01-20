@@ -18,7 +18,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from catanatron.game import Game
 from catanatron.models.player import Player, Color
-from catanatron.models.enums import Action, ActionPrompt
+from catanatron.models.enums import Action, ActionPrompt, ActionType
 
 from catanatron.players.llm.output_types import ActionByIndex
 from catanatron.players.llm.history import ConversationHistoryManager
@@ -75,9 +75,10 @@ CATAN_SYSTEM_PROMPT = """You are an expert Settlers of Catan player. Your goal i
 
 ## Decision Making
 Every turn use the `get_game_and_action_analysis` tool IMMEDIATELY before doing any thinking or reasoning. Do this exactly once per turn to get a comprehensive analysis of the game state and available actions.
-Use the available tools to analyze the game state before making decisions.
+Use the available tools to analyze the game state before making decisions. `initiate_negotiation` tool is available only when legal and must be used before using `trade_offer` tool.
 Consider both immediate gains and long-term strategy.
-If a strategy advisor recommendation is provided, consider it but you may choose differently based on your analysis.
+Pay attention to the negotiation history and performance of the other players. Consider using domestic trade offers in place of maritime trade offers when possible.
+If a strategy advisor recommendation is provided, take it into consideration but make the final decision based on your analysis.
 
 Always return a valid action from the available options."""
 
@@ -430,6 +431,14 @@ class BaseLLMPlayer(Player):
 
         return "\n".join(prompt_parts)
 
+    def _is_roll_or_end_turn(self, playable_actions: List[Action]) -> bool:
+        """Check if the only possible action is either roll or end turn."""
+        return len(playable_actions) == 1 and (
+            playable_actions[0].action_type == ActionType.ROLL or
+            playable_actions[0].action_type == ActionType.END_TURN or
+            playable_actions[0].action_type == ActionType.DISCARD
+        )
+
     def _resolve_action(
         self, output: ActionByIndex, playable_actions: List[Action]
     ) -> Action:
@@ -460,6 +469,12 @@ class BaseLLMPlayer(Player):
 
         This is the main entry point called by the game engine.
         """
+        # 0. Checkif the only possible action is either roll or end turn, return it immediately
+        if self._is_roll_or_end_turn(playable_actions):
+            action = playable_actions[0]
+            logfire.info(f"LLM player {self.color} chose action {action.action_type}", turn_number=game.state.num_turns)
+            return action
+
         # 1. Get strategy recommendation from parent (if any)
         recommendation, reasoning = self._get_strategy_recommendation(
             game, playable_actions

@@ -162,7 +162,10 @@ def _make_trade_offer(
 
 def _initiate_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
     """
-    Start a negotiation chat with other LLM players before making a trade offer.
+    !--Always use this tool before doing a MARITIME_TRADE. Play MARITIME_TRADE !ONLY! as a last resort. VERY IMPORTANT.
+    Use this tool BEFORE using the trade_offer tool.--!
+
+    Start a negotiation chat with other players before making a trade offer.
     
     This opens a shared chat room where you can discuss potential trades
     with other players. The negotiation continues in round-robin order
@@ -481,20 +484,35 @@ def create_trade_toolset() -> FunctionToolset:
     ) -> Dict[str, Any]:
         """
         Make a formal trade offer to other players.
+    
+        This creates an OFFER_TRADE action that will be submitted to the game engine.
+        If a negotiation is active, calling this tool will end the negotiation.
         
         Args:
             offer: Resources you are offering [wood, brick, sheep, wheat, ore]
             ask: Resources you want in return [wood, brick, sheep, wheat, ore]
+        
+        Returns:
+            Dictionary with the trade action details or error if invalid.
         """
         return _make_trade_offer(ctx, offer, ask)
     
     @toolset.tool
     def initiate_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
         """
-        Start a negotiation chat with other LLM players before making a trade offer.
+        !--Always use this tool before doing a MARITIME_TRADE. Play MARITIME_TRADE !ONLY! as a last resort. VERY IMPORTANT.
+        Use this tool BEFORE using the trade_offer tool.--!
+
+        Start a negotiation chat with other players before making a trade offer.
         
         This opens a shared chat room where you can discuss potential trades
-        with other players. You can only initiate one negotiation per turn.
+        with other players. The negotiation continues in round-robin order
+        until you make a trade offer.
+        
+        Note: You can only initiate one negotiation per turn.
+        
+        Returns:
+            Dictionary with negotiation status or error if not allowed.
         """
         return _initiate_negotiation(ctx)
     
@@ -604,7 +622,19 @@ def create_normal_play_with_trade_toolset() -> FunctionToolset:
     @toolset.tool
     def initiate_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
         """
-        Start a negotiation chat with other LLM players before making a trade offer.
+        !--Always use this tool before doing a MARITIME_TRADE. Play MARITIME_TRADE !ONLY! as a last resort. VERY IMPORTANT.
+        Use this tool BEFORE using the trade_offer tool.--!
+
+        Start a negotiation chat with other players before making a trade offer.
+        
+        This opens a shared chat room where you can discuss potential trades
+        with other players. The negotiation continues in round-robin order
+        until you make a trade offer.
+        
+        Note: You can only initiate one negotiation per turn.
+        
+        Returns:
+            Dictionary with negotiation status or error if not allowed.
         """
         return _initiate_negotiation(ctx)
     
