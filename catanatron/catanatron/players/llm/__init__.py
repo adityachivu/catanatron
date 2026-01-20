@@ -103,6 +103,7 @@ from catanatron.players.llm.toolsets import (
     NEGOTIATION_INITIATOR_TOOLSET,
     NegotiationDependencies,
     get_all_tools,
+    get_toolsets_for_game_state,
 )
 
 __all__ = [
@@ -149,4 +150,5 @@ __all__ = [
     "NEGOTIATION_PARTICIPANT_TOOLSET",
     "NEGOTIATION_INITIATOR_TOOLSET",
     "get_all_tools",
+    "get_toolsets_for_game_state",
 ]

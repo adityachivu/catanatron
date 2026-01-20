@@ -1,28 +1,36 @@
 """
-Negotiation system for LLM players in Catan.
+Negotiation framework for LLM-powered Catan players.
 
-This module provides the NegotiationManager class which orchestrates
-multi-player negotiations before formal trade offers are made.
+This module provides multi-player negotiation capabilities that run outside
+the game engine, allowing LLM players to discuss trades before making
+formal offers.
 
-Key features:
-- Round-robin messaging between LLM players
-- Automatic participation for all LLM players
-- Configurable round limits
-- History storage for DECIDE_TRADE context
+Key Components:
+- NegotiationMessage: A single message in a negotiation
+- NegotiationSession: State of an active negotiation
+- NegotiationManager: Orchestrates negotiations between LLM players
+- setup_negotiation(): Helper to wire up negotiation before game.play()
+
+Usage:
+    from catanatron.players.llm.negotiation import setup_negotiation
+    
+    game = Game(players)
+    manager = setup_negotiation(game, max_rounds=10)
+    winner = game.play()
 """
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Any, TYPE_CHECKING
 import time
 
-from pydantic_ai import UsageLimits
+from pydantic_ai import RunContext, UsageLimits
 
+from catanatron.game import Game
 from catanatron.models.player import Color
-from catanatron.models.enums import Action
+from catanatron.models.enums import Action, ActionType
 
 if TYPE_CHECKING:
-    from catanatron.game import Game
-    from catanatron.players.llm.base import BaseLLMPlayer
+    from catanatron.players.llm.base import BaseLLMPlayer, CatanDependencies
 
 
 @dataclass
@@ -32,24 +40,29 @@ class NegotiationMessage:
     content: str
     timestamp: float = field(default_factory=time.time)
     
-    def __str__(self) -> str:
-        return f"{self.sender.value}: {self.content}"
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "sender": self.sender.value,
+            "content": self.content,
+            "timestamp": self.timestamp,
+        }
 
 
 @dataclass
 class NegotiationSession:
     """
-    Represents an active negotiation between players.
+    State of an active negotiation.
     
     Attributes:
-        initiator: The player who started the negotiation
-        participants: All LLM players in seat order starting from initiator
-        messages: List of all messages exchanged
-        turn_index: Current speaker index in participants list
+        initiator: Color of the player who started the negotiation
+        participants: List of player colors in seat order from initiator
+        messages: List of messages exchanged during negotiation
+        turn_index: Index of current speaker in participants list
         is_active: Whether the negotiation is still ongoing
-        max_rounds: Maximum number of complete rounds before timeout
-        current_round: Current round number (increments when turn wraps)
-        left_players: Players who have explicitly left the negotiation
+        max_rounds: Maximum number of rounds before auto-ending
+        current_round: Current round number (one round = all participants speak)
+        game: Reference to the game for context
     """
     initiator: Color
     participants: List[Color]
@@ -57,8 +70,8 @@ class NegotiationSession:
     turn_index: int = 0
     is_active: bool = True
     max_rounds: int = 10
-    current_round: int = 1
-    left_players: Set[Color] = field(default_factory=set)
+    current_round: int = 0
+    game: Optional[Game] = None
     
     @property
     def current_speaker(self) -> Color:
@@ -66,34 +79,77 @@ class NegotiationSession:
         return self.participants[self.turn_index]
     
     @property
-    def active_participants(self) -> List[Color]:
-        """Get participants who haven't left."""
-        return [p for p in self.participants if p not in self.left_players]
+    def is_initiator_turn(self) -> bool:
+        """Check if it's the initiator's turn to speak."""
+        return self.current_speaker == self.initiator
     
-    def get_history_text(self) -> str:
-        """Format message history as text."""
+    def add_message(self, sender: Color, content: str) -> NegotiationMessage:
+        """Add a message to the session."""
+        msg = NegotiationMessage(sender=sender, content=content)
+        self.messages.append(msg)
+        return msg
+    
+    def advance_turn(self) -> None:
+        """Advance to the next speaker in round-robin order."""
+        self.turn_index = (self.turn_index + 1) % len(self.participants)
+        
+        # If we've cycled back to the initiator, increment round
+        if self.turn_index == 0:
+            self.current_round += 1
+    
+    def remove_participant(self, color: Color) -> bool:
+        """
+        Remove a participant from the negotiation.
+        
+        Returns True if removed, False if not found or is initiator.
+        """
+        if color == self.initiator:
+            return False  # Initiator cannot leave
+        
+        if color not in self.participants:
+            return False
+        
+        # Adjust turn_index if needed
+        removed_index = self.participants.index(color)
+        self.participants.remove(color)
+        
+        if removed_index < self.turn_index:
+            self.turn_index -= 1
+        elif removed_index == self.turn_index:
+            # Current speaker left, stay at same index (next person)
+            if self.turn_index >= len(self.participants):
+                self.turn_index = 0
+        
+        return True
+    
+    def format_history(self) -> str:
+        """Format message history as a string for prompts."""
         if not self.messages:
-            return "No messages exchanged yet."
-        return "\n".join(str(m) for m in self.messages)
+            return "No messages yet."
+        
+        lines = []
+        for msg in self.messages:
+            lines.append(f"{msg.sender.value}: {msg.content}")
+        return "\n".join(lines)
 
 
 class NegotiationManager:
     """
-    Manages negotiation sessions between LLM players.
+    Orchestrates negotiations between LLM players.
     
-    This class orchestrates the negotiation process:
-    1. Tracks which players are LLM players
-    2. Enforces one negotiation per turn limit
-    3. Manages round-robin messaging
-    4. Stores history for DECIDE_TRADE context
+    The manager:
+    - Tracks which players have initiated negotiations this turn
+    - Manages active negotiation sessions
+    - Runs the negotiation loop by calling each player's agent
+    - Distributes negotiation history to all participants when done
     
     Usage:
         manager = NegotiationManager(max_rounds=10)
-        # Register players during game setup
-        for player in game.state.players:
-            if isinstance(player, BaseLLMPlayer):
-                manager.register_player(player)
-                player.negotiation_manager = manager
+        manager.register_player(player1)
+        manager.register_player(player2)
+        
+        # When a player calls initiate_negotiation tool:
+        result = manager.start_negotiation(initiator_color, game)
     """
     
     def __init__(self, max_rounds: int = 10):
@@ -101,7 +157,7 @@ class NegotiationManager:
         Initialize the negotiation manager.
         
         Args:
-            max_rounds: Maximum messaging rounds before negotiation times out
+            max_rounds: Maximum rounds per negotiation before auto-ending
         """
         self.players: Dict[Color, "BaseLLMPlayer"] = {}
         self.current_session: Optional[NegotiationSession] = None
@@ -110,314 +166,353 @@ class NegotiationManager:
     
     def register_player(self, player: "BaseLLMPlayer") -> None:
         """
-        Register an LLM player for negotiation.
+        Register an LLM player with the manager.
         
         Args:
             player: The LLM player to register
         """
         self.players[player.color] = player
+        player.negotiation_manager = self
+    
+    def unregister_player(self, color: Color) -> None:
+        """Remove a player from the manager."""
+        if color in self.players:
+            self.players[color].negotiation_manager = None
+            del self.players[color]
     
     def can_initiate(self, color: Color, turn: int) -> bool:
         """
         Check if a player can initiate a negotiation.
         
+        A player can only initiate one negotiation per turn.
+        
         Args:
-            color: Player's color
-            turn: Current turn number
+            color: The player's color
+            turn: The current turn number
             
         Returns:
-            True if the player can initiate, False otherwise
+            True if the player can initiate a negotiation
         """
-        # Check if there's already an active session
-        if self.current_session is not None:
+        if color not in self.players:
             return False
         
-        # Check if this player already initiated this turn
+        if self.current_session is not None:
+            return False  # Another negotiation is in progress
+        
         turn_initiators = self.initiated_this_turn.get(turn, set())
         return color not in turn_initiators
     
-    def start_negotiation(self, initiator: Color, game: "Game") -> NegotiationSession:
+    def _get_participants_in_seat_order(self, initiator: Color, game: Game) -> List[Color]:
+        """
+        Get all LLM players in seat order starting from initiator.
+        
+        Args:
+            initiator: The initiating player's color
+            game: The current game
+            
+        Returns:
+            List of colors in seat order, starting with initiator
+        """
+        all_colors = list(game.state.colors)
+        initiator_index = all_colors.index(initiator)
+        
+        # Reorder to start with initiator
+        ordered = all_colors[initiator_index:] + all_colors[:initiator_index]
+        
+        # Filter to only include registered LLM players
+        return [c for c in ordered if c in self.players]
+    
+    def start_negotiation(self, initiator: Color, game: Game) -> Dict[str, Any]:
         """
         Start a new negotiation session.
         
+        This method:
+        1. Creates a new session
+        2. Marks the initiator as having initiated this turn
+        3. Runs the negotiation loop until completion
+        4. Returns the result (trade action or None)
+        
         Args:
             initiator: Color of the player starting the negotiation
-            game: Current game instance
+            game: The current game
             
         Returns:
-            The new NegotiationSession
+            Dictionary with negotiation result:
+            - "success": bool
+            - "trade_action": Optional[Action] - the trade offer if made
+            - "message": str - description of what happened
         """
         turn = game.state.num_turns
         
-        # Record that this player initiated this turn
+        # Check if can initiate
+        if not self.can_initiate(initiator, turn):
+            return {
+                "success": False,
+                "trade_action": None,
+                "message": "Cannot initiate negotiation (already initiated this turn or in progress)",
+            }
+        
+        # Mark as initiated this turn
         if turn not in self.initiated_this_turn:
             self.initiated_this_turn[turn] = set()
         self.initiated_this_turn[turn].add(initiator)
         
-        # Build participant list in seat order starting from initiator
-        all_colors = list(game.state.colors)
-        initiator_idx = all_colors.index(initiator)
+        # Get participants
+        participants = self._get_participants_in_seat_order(initiator, game)
         
-        # Rotate to put initiator first, include only LLM players
-        participants = []
-        for i in range(len(all_colors)):
-            color = all_colors[(initiator_idx + i) % len(all_colors)]
-            if color in self.players:
-                participants.append(color)
+        if len(participants) < 2:
+            return {
+                "success": False,
+                "trade_action": None,
+                "message": "Not enough LLM players for negotiation",
+            }
         
+        # Create session
         self.current_session = NegotiationSession(
             initiator=initiator,
             participants=participants,
             max_rounds=self.max_rounds,
+            game=game,
         )
         
-        return self.current_session
+        # Run the negotiation loop
+        trade_action = self._run_negotiation_loop(game)
+        
+        # End the session and distribute history
+        self._end_negotiation()
+        
+        if trade_action:
+            return {
+                "success": True,
+                "trade_action": trade_action,
+                "message": "Negotiation completed with trade offer",
+            }
+        else:
+            return {
+                "success": True,
+                "trade_action": None,
+                "message": "Negotiation ended without trade offer",
+            }
     
-    def add_message(self, sender: Color, content: str) -> NegotiationMessage:
+    def _run_negotiation_loop(self, game: Game) -> Optional[Action]:
         """
-        Add a message to the current negotiation.
+        Run the main negotiation loop.
+        
+        Each participant speaks in turn (round-robin from initiator).
+        The loop ends when:
+        - Initiator makes a trade offer
+        - Max rounds reached
+        - All non-initiator participants leave
         
         Args:
-            sender: Color of the message sender
-            content: Message content
+            game: The current game
             
         Returns:
-            The created NegotiationMessage
-        """
-        if self.current_session is None:
-            raise RuntimeError("No active negotiation session")
-        
-        message = NegotiationMessage(sender=sender, content=content)
-        self.current_session.messages.append(message)
-        return message
-    
-    def advance_turn(self) -> None:
-        """
-        Advance to the next speaker in the negotiation.
-        
-        Handles wrapping around and incrementing rounds.
-        """
-        if self.current_session is None:
-            return
-        
-        session = self.current_session
-        
-        # Find next active participant
-        original_index = session.turn_index
-        while True:
-            session.turn_index = (session.turn_index + 1) % len(session.participants)
-            
-            # Check if we've wrapped around (new round)
-            if session.turn_index == 0:
-                session.current_round += 1
-            
-            # Skip players who have left
-            if session.current_speaker not in session.left_players:
-                break
-            
-            # Safety check - if we've gone full circle, everyone left
-            if session.turn_index == original_index:
-                self.end_negotiation()
-                break
-    
-    def player_leaves(self, color: Color) -> None:
-        """
-        Mark a player as leaving the negotiation.
-        
-        Args:
-            color: Color of the leaving player
-        """
-        if self.current_session is None:
-            return
-        
-        self.current_session.left_players.add(color)
-        
-        # Check if only one player remains or initiator left
-        active = self.current_session.active_participants
-        if len(active) <= 1 or color == self.current_session.initiator:
-            self.end_negotiation()
-    
-    def end_negotiation(self) -> List[NegotiationMessage]:
-        """
-        End the current negotiation and distribute history.
-        
-        Returns:
-            List of all messages from the negotiation
-        """
-        if self.current_session is None:
-            return []
-        
-        messages = self.current_session.messages.copy()
-        
-        # Store history on each participant for DECIDE_TRADE context
-        for color in self.current_session.participants:
-            if color in self.players:
-                self.players[color].store_negotiation_history(messages)
-        
-        self.current_session = None
-        return messages
-    
-    def run_negotiation(self, game: "Game") -> Optional[Action]:
-        """
-        Run the full negotiation loop.
-        
-        Called from initiate_negotiation tool. Blocks until negotiation
-        completes (trade offer made, cancelled, or timeout).
-        
-        Args:
-            game: Current game instance
-            
-        Returns:
-            OFFER_TRADE Action if initiator makes an offer, None otherwise
+            OFFER_TRADE action if initiator made one, else None
         """
         from catanatron.players.llm.toolsets import (
-            NEGOTIATION_PARTICIPANT_TOOLSET,
             NEGOTIATION_INITIATOR_TOOLSET,
-            NegotiationDependencies,
+            NEGOTIATION_PARTICIPANT_TOOLSET,
         )
-        
-        if self.current_session is None:
-            return None
+        from catanatron.players.llm.base import CatanDependencies
         
         session = self.current_session
-        
-        # Skip the initiator's first turn - they just initiated and will
-        # send their first message in the agent run that called this
-        self.advance_turn()
+        if session is None:
+            return None
         
         while session.is_active:
-            # Check round limit
-            if session.current_round > session.max_rounds:
-                self._end_negotiation_timeout()
-                return None
-            
             current_color = session.current_speaker
-            
-            # Skip players who have left
-            if current_color in session.left_players:
-                self.advance_turn()
-                continue
-            
             player = self.players.get(current_color)
+            
             if player is None:
-                self.advance_turn()
+                # Player was unregistered, skip
+                session.advance_turn()
                 continue
             
-            # Build negotiation prompt
-            prompt = self._build_negotiation_prompt()
-            
-            # Select toolset based on whether this is the initiator
-            is_initiator = current_color == session.initiator
-            toolset = NEGOTIATION_INITIATOR_TOOLSET if is_initiator else NEGOTIATION_PARTICIPANT_TOOLSET
+            # Build negotiation-specific prompt
+            prompt = self._build_negotiation_prompt(session, current_color)
             
             # Build dependencies
-            deps = NegotiationDependencies(
+            deps = CatanDependencies(
                 color=current_color,
                 game=game,
-                playable_actions=game.state.playable_actions if hasattr(game.state, 'playable_actions') else [],
+                playable_actions=[],  # No game actions during negotiation
                 strategy_recommendation=None,
                 strategy_reasoning=None,
                 turn_number=game.state.num_turns,
-                is_my_turn=False,  # Not their formal turn
+                is_my_turn=False,  # Not really their turn in game terms
                 negotiation_manager=self,
                 player_instance=player,
             )
             
+            # Select toolset based on whether this is the initiator
+            if session.is_initiator_turn:
+                toolsets = [NEGOTIATION_INITIATOR_TOOLSET]
+            else:
+                toolsets = [NEGOTIATION_PARTICIPANT_TOOLSET]
+            
+            # Run the player's agent
             try:
-                # Run the player's agent with negotiation toolset
                 result = player.agent.run_sync(
                     prompt,
                     deps=deps,
-                    tools=toolset,
+                    toolsets=toolsets,
                     usage_limits=UsageLimits(tool_calls_limit=5),
                 )
                 
-                # Check if a trade action was produced
-                if hasattr(player, '_pending_trade_action') and player._pending_trade_action:
-                    action = player._pending_trade_action
+                # Check if a trade action was set
+                if player._pending_trade_action is not None:
+                    trade_action = player._pending_trade_action
                     player._pending_trade_action = None
-                    self.end_negotiation()
-                    return action
+                    session.is_active = False
+                    return trade_action
                 
             except Exception as e:
-                # On error, skip this player's turn
+                # Log error but continue negotiation
                 import logfire
-                logfire.warning(
-                    f"Negotiation error for {current_color}",
-                    error=str(e)
+                logfire.error(
+                    f"Negotiation error for {current_color}: {e}",
+                    color=current_color.value
                 )
             
-            # Check if negotiation was ended (by leave_negotiation or trade)
-            if self.current_session is None:
+            # Advance to next speaker
+            session.advance_turn()
+            
+            # Check if max rounds reached
+            if session.current_round >= session.max_rounds:
+                session.is_active = False
                 return None
             
-            self.advance_turn()
+            # Check if only initiator remains
+            if len(session.participants) <= 1:
+                session.is_active = False
+                return None
         
         return None
     
-    def _build_negotiation_prompt(self) -> str:
-        """Build the prompt for a player during negotiation."""
-        if self.current_session is None:
-            return "No active negotiation."
+    def _build_negotiation_prompt(self, session: NegotiationSession, speaker: Color) -> str:
+        """
+        Build the prompt for a negotiation turn.
         
-        session = self.current_session
+        Args:
+            session: The current negotiation session
+            speaker: The color of the player who should speak
+            
+        Returns:
+            Prompt string for the agent
+        """
+        lines = []
         
-        parts = [
-            "=== NEGOTIATION SESSION ===",
-            f"You are {session.current_speaker.value} in a trade negotiation.",
-            f"Initiated by: {session.initiator.value}",
-            f"Round {session.current_round}/{session.max_rounds}",
-            "",
-            "=== CONVERSATION HISTORY ===",
-            session.get_history_text(),
-            "",
-            "=== YOUR OPTIONS ===",
-        ]
+        lines.append("=== TRADE NEGOTIATION ===")
+        lines.append(f"You are {speaker.value} in a trade negotiation.")
+        lines.append(f"Initiated by: {session.initiator.value}")
+        lines.append(f"Participants: {[c.value for c in session.participants]}")
+        lines.append(f"Round: {session.current_round + 1}/{session.max_rounds}")
+        lines.append("")
         
-        if session.current_speaker == session.initiator:
-            parts.append("- send_message: Continue negotiating")
-            parts.append("- trade_offer: Make a formal trade offer")
-            parts.append("- leave_negotiation: Cancel the negotiation")
+        # Add conversation history
+        if session.messages:
+            lines.append("=== CONVERSATION SO FAR ===")
+            lines.append(session.format_history())
+            lines.append("")
         else:
-            parts.append("- send_message: Respond to the negotiation")
-            parts.append("- leave_negotiation: Leave the negotiation")
+            lines.append("This is the start of the negotiation. No messages yet.")
+            lines.append("")
         
-        parts.append("")
-        parts.append("What would you like to do?")
+        # Add instructions based on role
+        if speaker == session.initiator:
+            lines.append("=== YOUR TURN (INITIATOR) ===")
+            lines.append("You initiated this negotiation. You can:")
+            lines.append("1. Send a message to discuss the trade")
+            lines.append("2. Make a formal trade offer (this ends the negotiation)")
+            lines.append("")
+            lines.append("Use get_game_and_action_analysis to review your resources,")
+            lines.append("then send_message to propose trades or trade_offer to make a formal offer.")
+        else:
+            lines.append("=== YOUR TURN ===")
+            lines.append("You can:")
+            lines.append("1. Send a message to respond or make counter-proposals")
+            lines.append("2. Leave the negotiation if you're not interested")
+            lines.append("")
+            lines.append("Use get_game_and_action_analysis to review your resources,")
+            lines.append("then send_message to respond or leave_negotiation to exit.")
         
-        return "\n".join(parts)
+        return "\n".join(lines)
     
-    def _end_negotiation_timeout(self) -> None:
-        """End negotiation due to timeout."""
+    def add_message(self, sender: Color, content: str) -> None:
+        """
+        Add a message to the current session.
+        
+        Called by the send_message tool.
+        
+        Args:
+            sender: Color of the message sender
+            content: Message content
+        """
         if self.current_session is None:
             return
         
-        # Add a system message about timeout
-        self.add_message(
-            self.current_session.initiator,
-            "[SYSTEM: Negotiation timed out after maximum rounds]"
-        )
+        self.current_session.add_message(sender, content)
+    
+    def remove_participant(self, color: Color) -> bool:
+        """
+        Remove a participant from the current session.
         
-        self.end_negotiation()
+        Called by the leave_negotiation tool.
+        
+        Args:
+            color: Color of the participant to remove
+            
+        Returns:
+            True if removed, False otherwise
+        """
+        if self.current_session is None:
+            return False
+        
+        return self.current_session.remove_participant(color)
+    
+    def _end_negotiation(self) -> None:
+        """
+        End the current negotiation and distribute history.
+        
+        Stores the negotiation history on each participant player.
+        """
+        if self.current_session is None:
+            return
+        
+        messages = self.current_session.messages.copy()
+        
+        # Store history on each participant
+        for color in self.current_session.participants:
+            player = self.players.get(color)
+            if player is not None:
+                player.store_negotiation_history(messages)
+        
+        self.current_session = None
+    
+    def reset(self) -> None:
+        """Reset the manager state (e.g., between games)."""
+        self.current_session = None
+        self.initiated_this_turn.clear()
 
 
-def setup_negotiation(game: "Game", max_rounds: int = 10) -> NegotiationManager:
+def setup_negotiation(game: Game, max_rounds: int = 10) -> NegotiationManager:
     """
-    Set up negotiation for a game.
+    Set up negotiation support for a game.
     
     Call this before game.play() to enable negotiation between LLM players.
     
     Args:
         game: The game instance
-        max_rounds: Maximum messaging rounds per negotiation
+        max_rounds: Maximum rounds per negotiation
         
     Returns:
-        The configured NegotiationManager
+        The NegotiationManager instance
         
     Example:
         game = Game(players)
         manager = setup_negotiation(game, max_rounds=10)
-        game.play()
+        winner = game.play()
     """
     from catanatron.players.llm.base import BaseLLMPlayer
     
@@ -426,6 +521,5 @@ def setup_negotiation(game: "Game", max_rounds: int = 10) -> NegotiationManager:
     for player in game.state.players:
         if isinstance(player, BaseLLMPlayer):
             manager.register_player(player)
-            player.negotiation_manager = manager
     
     return manager

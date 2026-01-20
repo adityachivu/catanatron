@@ -12,8 +12,9 @@ based on game state (e.g., trade tools only available after rolling).
 from dataclasses import dataclass
 from typing import Optional, List, Literal, Any, Union, TYPE_CHECKING
 
-from pydantic_ai import Agent, UsageLimits, ModelSettings, Tool
+from pydantic_ai import Agent, UsageLimits, ModelSettings
 from pydantic_ai.models import Model
+from pydantic_ai.toolsets import FunctionToolset
 
 from catanatron.game import Game
 from catanatron.models.player import Player, Color
@@ -235,11 +236,11 @@ class BaseLLMPlayer(Player):
         
         return ModelSettings(**settings) if settings else None
     
-    def _select_tools(self, game: Game) -> List[Tool]:
+    def _select_toolsets(self, game: Game) -> List[FunctionToolset]:
         """
-        Select appropriate tools based on current game state.
+        Select appropriate toolsets based on current game state.
         
-        This method determines which tools should be available to the agent
+        This method determines which toolsets should be available to the agent
         for the current decision. Trade tools are only available when:
         - It's the PLAY_TURN phase
         - The player has already rolled
@@ -249,7 +250,7 @@ class BaseLLMPlayer(Player):
             game: Current game instance
             
         Returns:
-            List of Tool instances to pass to agent.run_sync()
+            List of FunctionToolset instances to pass to agent.run_sync()
         """
         from catanatron.players.llm.toolsets import (
             NORMAL_PLAY_TOOLSET,
@@ -257,9 +258,9 @@ class BaseLLMPlayer(Player):
         )
         
         if self._can_trade(game):
-            return NORMAL_PLAY_WITH_TRADE_TOOLSET
+            return [NORMAL_PLAY_WITH_TRADE_TOOLSET]
         else:
-            return NORMAL_PLAY_TOOLSET
+            return [NORMAL_PLAY_TOOLSET]
     
     def _can_trade(self, game: Game) -> bool:
         """
@@ -489,10 +490,10 @@ class BaseLLMPlayer(Player):
             player_instance=self,
         )
 
-        # 5. Select appropriate tools based on game state
-        tools = self._select_tools(game)
+        # 5. Select appropriate toolsets based on game state
+        toolsets = self._select_toolsets(game)
 
-        # 6. Run agent with history, tools, and model settings
+        # 6. Run agent with history, toolsets, and model settings
         try:
             # Get model settings (temperature, max_tokens, timeout, etc.)
             model_settings = self._get_model_settings()
@@ -501,7 +502,7 @@ class BaseLLMPlayer(Player):
                 self._build_prompt(game),
                 deps=deps,
                 message_history=self.history_manager.get_messages(),
-                tools=tools,
+                toolsets=toolsets,
                 usage_limits=UsageLimits(
                     tool_calls_limit=self.tool_calls_limit,
                 ),

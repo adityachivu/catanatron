@@ -1,92 +1,71 @@
 """
 PydanticAI Toolsets for the Catan LLM agent.
 
-This module provides a toolset-based architecture for managing agent tools.
-Tools are organized into logical toolsets that can be composed and selected
-at runtime based on game state.
+This module provides composable toolsets using Pydantic AI's FunctionToolset pattern.
+Toolsets are selected at agent.run() time based on game state, enabling:
+- Conditional tool availability (e.g., trade tools only after rolling)
+- Different toolsets for different game phases (normal play, negotiation, trade decision)
+- Clean separation between analysis, trading, and negotiation tools
 
 Toolsets:
-- ANALYSIS_TOOLSET: Game state analysis tools
+- ANALYSIS_TOOLSET: Game state analysis tools (always available)
 - TRADE_TOOLSET: Trade offer and negotiation initiation tools
-- CHAT_TOOLSET: Negotiation messaging tools
-- NORMAL_PLAY_TOOLSET: Analysis tools for normal gameplay
-- NORMAL_PLAY_WITH_TRADE_TOOLSET: Analysis + trade tools when trading is available
-- NEGOTIATION_PARTICIPANT_TOOLSET: Tools for players participating in negotiation
+- CHAT_TOOLSET: Messaging tools during negotiation
+- NORMAL_PLAY_TOOLSET: Analysis tools only
+- NORMAL_PLAY_WITH_TRADE_TOOLSET: Analysis + trade tools (after rolling)
+- NEGOTIATION_PARTICIPANT_TOOLSET: Analysis + chat tools (during negotiation)
 """
 
-from typing import List, Dict, Any, Optional, TYPE_CHECKING
-from dataclasses import dataclass
+from typing import List, Dict, Any
+from pydantic_ai import RunContext
+from pydantic_ai.toolsets import FunctionToolset
 
-from pydantic_ai import Tool, RunContext
-
-from catanatron.models.enums import Action, ActionType, RESOURCES
-from catanatron.models.map import LandTile, number_probability
 from catanatron.state_functions import (
     get_visible_victory_points,
     get_player_freqdeck,
 )
+from catanatron.models.enums import CITY, ActionType, Action
+from catanatron.models.map import LandTile
 
-if TYPE_CHECKING:
-    from catanatron.players.llm.base import CatanDependencies
-    from catanatron.players.llm.negotiation import NegotiationManager
-
-
-# ============ Extended Dependencies for Negotiation ============
-
-@dataclass
-class NegotiationDependencies:
-    """
-    Extended dependencies for negotiation context.
-    
-    Includes all CatanDependencies fields plus negotiation-specific context.
-    """
-    # Base dependencies
-    color: Any  # Color
-    game: Any  # Game
-    playable_actions: List[Action]
-    strategy_recommendation: Optional[Action]
-    strategy_reasoning: Optional[str]
-    turn_number: int
-    is_my_turn: bool
-    
-    # Negotiation-specific
-    negotiation_manager: Optional["NegotiationManager"] = None
-    player_instance: Optional[Any] = None  # BaseLLMPlayer reference
+# Import CatanDependencies directly for type hints in toolsets
+# This is needed because Pydantic AI evaluates type hints at runtime
+from catanatron.players.llm.base import CatanDependencies
 
 
-# ============ Tool Implementation Functions ============
-# These are plain functions that will be wrapped with Tool()
+# ============================================================================
+# Tool Implementation Functions
+# ============================================================================
 
-def get_game_and_action_analysis(ctx: RunContext) -> Dict[str, Any]:
+def _get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
     """
     Get comprehensive game state, available actions, and strategy recommendation.
     
-    Use this IMMEDIATELY at the start of your turn to understand the game state
+    Use this tool FIRST on every turn to understand the current game situation
     before making any decisions.
     """
     from catanatron.players.llm.state_formatter import StateFormatter
     
-    deps = ctx.deps
-    return {
-        "game_state": StateFormatter.format_full_state(deps.game, deps.color),
+    full_analysis = {
+        "game_state": StateFormatter.format_full_state(ctx.deps.game, ctx.deps.color),
         "available_actions": [
             StateFormatter.format_action(action, i) 
-            for i, action in enumerate(deps.playable_actions)
+            for i, action in enumerate(ctx.deps.playable_actions)
         ],
         "strategy_recommendation": (
-            deps.strategy_recommendation 
-            if deps.strategy_recommendation 
+            ctx.deps.strategy_recommendation 
+            if ctx.deps.strategy_recommendation 
             else "No strategy advisor configured"
         ),
         "strategy_reasoning": (
-            deps.strategy_reasoning 
-            if deps.strategy_reasoning 
+            ctx.deps.strategy_reasoning 
+            if ctx.deps.strategy_reasoning 
             else "No detailed reasoning available"
         ),
     }
+    return full_analysis
 
 
-def analyze_board(ctx: RunContext, focus: str) -> Dict[str, Any]:
+def _analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
     """
     Analyze the board for strategic insights.
 
@@ -97,16 +76,8 @@ def analyze_board(ctx: RunContext, focus: str) -> Dict[str, Any]:
             - 'ports': Port accessibility and trading options
             - 'robber': Optimal robber placements
     """
-    from catanatron.players.llm.tools import (
-        _analyze_expansion,
-        _analyze_blocking,
-        _analyze_ports,
-        _analyze_robber,
-    )
-    
-    deps = ctx.deps
-    game = deps.game
-    my_color = deps.color
+    game = ctx.deps.game
+    my_color = ctx.deps.color
 
     if focus == "expansion":
         return _analyze_expansion(game, my_color)
@@ -123,387 +94,684 @@ def analyze_board(ctx: RunContext, focus: str) -> Dict[str, Any]:
         }
 
 
-def make_trade_offer(
-    ctx: RunContext,
-    offer: List[int],
-    ask: List[int],
-    target_player: Optional[str] = None
+def _make_trade_offer(
+    ctx: RunContext[CatanDependencies], 
+    offer: List[int], 
+    ask: List[int]
 ) -> Dict[str, Any]:
     """
-    Create an OFFER_TRADE action to trade resources with other players.
+    Make a formal trade offer to other players.
     
-    This will end any active negotiation and submit the formal trade offer.
+    This creates an OFFER_TRADE action that will be submitted to the game engine.
+    If a negotiation is active, calling this tool will end the negotiation.
     
     Args:
-        offer: Resources you're offering [wood, brick, sheep, wheat, ore]
+        offer: Resources you are offering [wood, brick, sheep, wheat, ore]
         ask: Resources you want in return [wood, brick, sheep, wheat, ore]
-        target_player: Optional color of specific player to trade with (e.g., "RED", "BLUE")
     
     Returns:
-        Dictionary with trade action details or error if invalid.
+        Dictionary with the trade action details or error if invalid.
     """
-    deps = ctx.deps
-    
-    # Validate offer/ask format
+    # Validate offer and ask are 5-element lists
     if len(offer) != 5 or len(ask) != 5:
         return {
-            "error": "offer and ask must each be 5-element lists [wood, brick, sheep, wheat, ore]",
+            "error": "Both offer and ask must be 5-element lists [wood, brick, sheep, wheat, ore]",
             "offer_received": offer,
             "ask_received": ask,
         }
     
-    # Check if any resources are being exchanged
-    if sum(offer) == 0 or sum(ask) == 0:
-        return {
-            "error": "Must offer and ask for at least some resources",
-            "offer": offer,
-            "ask": ask,
-        }
-    
-    # Verify player has the resources to offer
-    my_resources = get_player_freqdeck(deps.game.state, deps.color)
-    resource_names = ["wood", "brick", "sheep", "wheat", "ore"]
-    
-    insufficient = []
-    for i, (have, offering) in enumerate(zip(my_resources, offer)):
+    # Check player has enough resources to offer
+    player_resources = get_player_freqdeck(ctx.deps.game.state, ctx.deps.color)
+    for i, (have, offering) in enumerate(zip(player_resources, offer)):
         if offering > have:
-            insufficient.append(f"{resource_names[i]}: have {have}, offering {offering}")
-    
-    if insufficient:
-        return {
-            "error": "Insufficient resources to make this offer",
-            "problems": insufficient,
-            "your_resources": dict(zip(resource_names, my_resources)),
-        }
-    
-    # Create the trade tuple (offer + ask = 10 elements)
-    trade_value = tuple(offer + ask)
-    
-    # Find the OFFER_TRADE action in playable actions
-    for i, action in enumerate(deps.playable_actions):
-        if action.action_type == ActionType.OFFER_TRADE and action.value == trade_value:
-            # End any active negotiation
-            if hasattr(deps, 'negotiation_manager') and deps.negotiation_manager:
-                if deps.negotiation_manager.current_session:
-                    deps.negotiation_manager.end_negotiation()
-            
-            # Store the action for the player to return
-            if hasattr(deps, 'player_instance') and deps.player_instance:
-                deps.player_instance._pending_trade_action = action
-            
+            resource_names = ["wood", "brick", "sheep", "wheat", "ore"]
             return {
-                "success": True,
-                "action_index": i,
-                "trade_offer": {
-                    "offering": dict(zip(resource_names, offer)),
-                    "asking": dict(zip(resource_names, ask)),
-                },
-                "message": "Trade offer created. Other players will now decide whether to accept.",
+                "error": f"You don't have enough {resource_names[i]} to offer. Have: {have}, Offering: {offering}",
+                "your_resources": dict(zip(resource_names, player_resources)),
             }
     
-    # OFFER_TRADE not in available actions - might need to construct it
-    # Check if OFFER_TRADE is generally available
-    offer_trade_available = any(
-        a.action_type == ActionType.OFFER_TRADE 
-        for a in deps.playable_actions
-    )
+    # Validate trade (can't give away for free, can't trade same resource)
+    if sum(offer) == 0 or sum(ask) == 0:
+        return {"error": "Cannot make a trade with nothing offered or nothing asked"}
     
-    if not offer_trade_available:
-        return {
-            "error": "Cannot make trade offers right now",
-            "reason": "OFFER_TRADE is not among available actions",
-            "hint": "You may need to roll first, or trading might not be allowed in this phase",
-        }
+    for o, a in zip(offer, ask):
+        if o > 0 and a > 0:
+            return {"error": "Cannot offer and ask for the same resource type"}
     
-    # The specific trade is valid but not in pre-generated list
-    # Create the action directly
-    trade_action = Action(deps.color, ActionType.OFFER_TRADE, trade_value)
+    # Create the trade action value tuple
+    trade_value = tuple(offer + ask)
     
-    # End any active negotiation
-    if hasattr(deps, 'negotiation_manager') and deps.negotiation_manager:
-        if deps.negotiation_manager.current_session:
-            deps.negotiation_manager.end_negotiation()
+    # Store the pending trade action on the player instance
+    # The decide() method will check for this and return it
+    if ctx.deps.player_instance is not None:
+        ctx.deps.player_instance._pending_trade_action = Action(
+            ctx.deps.color, 
+            ActionType.OFFER_TRADE, 
+            trade_value
+        )
     
-    # Store for player to return
-    if hasattr(deps, 'player_instance') and deps.player_instance:
-        deps.player_instance._pending_trade_action = trade_action
-    
+    resource_names = ["wood", "brick", "sheep", "wheat", "ore"]
     return {
         "success": True,
-        "trade_offer": {
-            "offering": dict(zip(resource_names, offer)),
-            "asking": dict(zip(resource_names, ask)),
-        },
-        "message": "Trade offer created. Other players will now decide whether to accept.",
+        "trade_created": True,
+        "offering": {resource_names[i]: v for i, v in enumerate(offer) if v > 0},
+        "asking": {resource_names[i]: v for i, v in enumerate(ask) if v > 0},
+        "message": "Trade offer will be submitted. Other players will now decide whether to accept.",
     }
 
 
-def initiate_negotiation(ctx: RunContext) -> Dict[str, Any]:
+def _initiate_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
     """
     Start a negotiation chat with other LLM players before making a trade offer.
     
-    This allows you to discuss potential trades with other players before
-    committing to a formal offer. All LLM players will automatically join
-    the negotiation.
+    This opens a shared chat room where you can discuss potential trades
+    with other players. The negotiation continues in round-robin order
+    until you make a trade offer.
+    
+    Note: You can only initiate one negotiation per turn.
     
     Returns:
-        Dictionary with negotiation session info or error if cannot initiate.
+        Dictionary with negotiation status or error if not allowed.
     """
-    deps = ctx.deps
-    
     # Check if negotiation manager is available
-    if not hasattr(deps, 'negotiation_manager') or deps.negotiation_manager is None:
+    player = ctx.deps.player_instance
+    if player is None or player.negotiation_manager is None:
         return {
-            "error": "Negotiation not available",
-            "reason": "No negotiation manager configured for this game",
-            "hint": "Use trade_offer directly to make trades",
+            "error": "Negotiation is not available. No NegotiationManager configured.",
+            "suggestion": "You can still make direct trade offers using the trade_offer tool.",
         }
     
-    manager = deps.negotiation_manager
+    manager = player.negotiation_manager
+    turn = ctx.deps.game.state.num_turns
     
-    # Check if we can initiate
-    if not manager.can_initiate(deps.color, deps.turn_number):
+    # Check if player can initiate (hasn't already this turn)
+    if not manager.can_initiate(ctx.deps.color, turn):
         return {
-            "error": "Cannot initiate negotiation",
-            "reason": "You have already initiated a negotiation this turn",
-            "hint": "You can only start one negotiation per turn",
+            "error": "You have already initiated a negotiation this turn.",
+            "suggestion": "Make a trade offer directly using the trade_offer tool.",
         }
     
-    # Check if there are other LLM players to negotiate with
-    other_llm_players = [
-        color for color in manager.players.keys() 
-        if color != deps.color
-    ]
+    # Start the negotiation - this will run the negotiation loop
+    # and return when the initiator makes a trade offer or negotiation ends
+    result = manager.start_negotiation(ctx.deps.color, ctx.deps.game)
     
-    if not other_llm_players:
+    if result.get("trade_action"):
+        # Negotiation ended with a trade offer
+        ctx.deps._pending_trade_action = result["trade_action"]
         return {
-            "error": "No other LLM players to negotiate with",
-            "reason": "Negotiation requires at least one other LLM player",
-            "hint": "Use trade_offer to trade with non-LLM players",
+            "success": True,
+            "negotiation_completed": True,
+            "trade_offer_made": True,
+            "message": "Negotiation completed. Your trade offer will be submitted.",
         }
-    
-    # Start the negotiation
-    session = manager.start_negotiation(deps.color, deps.game)
-    
-    return {
-        "success": True,
-        "session_started": True,
-        "participants": [c.value for c in session.participants],
-        "max_rounds": session.max_rounds,
-        "message": (
-            f"Negotiation started with {len(session.participants)} players. "
-            "Use send_message to communicate, then trade_offer to make an offer."
-        ),
-        "hint": "You speak first. Other players will respond in turn order.",
-    }
+    else:
+        return {
+            "success": True,
+            "negotiation_completed": True,
+            "trade_offer_made": False,
+            "message": "Negotiation ended without a trade offer. You can continue your turn.",
+        }
 
 
-def send_message(ctx: RunContext, message: str) -> Dict[str, Any]:
+def _send_message(ctx: RunContext[CatanDependencies], message: str) -> Dict[str, Any]:
     """
     Send a message to other players during negotiation.
     
-    Use this to communicate your trading intentions, ask what others need,
-    or negotiate terms before making a formal offer.
+    Use this to communicate your trading intentions, make proposals,
+    or respond to other players' offers.
     
     Args:
-        message: The message to send to other players.
+        message: Your message to other players (free-form natural language)
     
     Returns:
-        Dictionary with message confirmation or error.
+        Dictionary confirming the message was sent.
     """
-    deps = ctx.deps
+    # This will be called by NegotiationManager during negotiation
+    # The message is stored via the negotiation context
+    player = ctx.deps.player_instance
+    if player is None or player.negotiation_manager is None:
+        return {"error": "Not in an active negotiation."}
     
-    if not hasattr(deps, 'negotiation_manager') or deps.negotiation_manager is None:
-        return {
-            "error": "Not in a negotiation",
-            "hint": "Use initiate_negotiation first to start a negotiation session",
-        }
-    
-    manager = deps.negotiation_manager
-    
+    manager = player.negotiation_manager
     if manager.current_session is None:
-        return {
-            "error": "No active negotiation session",
-            "hint": "Use initiate_negotiation first to start a negotiation session",
-        }
+        return {"error": "No active negotiation session."}
     
-    session = manager.current_session
-    
-    # Verify it's this player's turn to speak
-    current_speaker = session.participants[session.turn_index]
-    if current_speaker != deps.color:
-        return {
-            "error": "Not your turn to speak",
-            "current_speaker": current_speaker.value,
-            "your_color": deps.color.value,
-        }
-    
-    # Add the message
-    manager.add_message(deps.color, message)
+    # Record the message
+    manager.add_message(ctx.deps.color, message)
     
     return {
         "success": True,
         "message_sent": message,
-        "your_color": deps.color.value,
-        "messages_so_far": len(session.messages),
-        "round": session.current_round,
-        "hint": "Wait for other players to respond, then continue negotiating or make a trade_offer",
+        "your_color": ctx.deps.color.value,
     }
 
 
-def leave_negotiation(ctx: RunContext) -> Dict[str, Any]:
+def _leave_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
     """
-    Exit the current negotiation early without making a trade offer.
+    Exit the current negotiation early.
     
-    Use this if you decide you don't want to trade after all, or if
-    negotiations aren't going well.
+    Use this if you don't want to continue participating in the negotiation.
+    Note: Only the initiator can end the negotiation with a trade offer.
     
     Returns:
-        Dictionary confirming exit from negotiation.
+        Dictionary confirming you left the negotiation.
     """
-    deps = ctx.deps
+    player = ctx.deps.player_instance
+    if player is None or player.negotiation_manager is None:
+        return {"error": "Not in an active negotiation."}
     
-    if not hasattr(deps, 'negotiation_manager') or deps.negotiation_manager is None:
-        return {
-            "error": "Not in a negotiation",
-        }
-    
-    manager = deps.negotiation_manager
-    
+    manager = player.negotiation_manager
     if manager.current_session is None:
-        return {
-            "error": "No active negotiation to leave",
-        }
+        return {"error": "No active negotiation session."}
     
-    # Mark this player as leaving
-    manager.player_leaves(deps.color)
+    # Remove self from participants
+    manager.remove_participant(ctx.deps.color)
     
     return {
         "success": True,
-        "message": "You have left the negotiation",
-        "negotiation_ended": manager.current_session is None,
+        "message": "You have left the negotiation.",
+        "your_color": ctx.deps.color.value,
     }
 
 
-# ============ Tool Wrappers ============
+# ============================================================================
+# Helper Functions for Board Analysis
+# ============================================================================
 
-game_analysis_tool = Tool(
-    get_game_and_action_analysis,
-    name="get_game_and_action_analysis",
-    description=(
-        "Get comprehensive game state, available actions, and strategy recommendation. "
-        "Use this IMMEDIATELY at the start of your turn before making any decisions."
-    ),
-)
+def _analyze_expansion(game, my_color) -> Dict[str, Any]:
+    """Analyze expansion opportunities."""
+    board = game.state.board
 
-board_analysis_tool = Tool(
-    analyze_board,
-    name="analyze_board",
-    description=(
-        "Analyze the board for strategic insights. "
-        "Options: 'expansion' (where to build), 'blocking' (block opponents), "
-        "'ports' (trading access), 'robber' (optimal robber placement)."
-    ),
-)
+    buildable_nodes = list(board.buildable_node_ids(my_color))
+    buildable_edges = [list(e) for e in board.buildable_edges(my_color)]
 
-trade_offer_tool = Tool(
-    make_trade_offer,
-    name="trade_offer",
-    description=(
-        "Make a formal trade offer to other players. "
-        "Format: offer=[wood,brick,sheep,wheat,ore], ask=[wood,brick,sheep,wheat,ore]. "
-        "This ends any active negotiation and submits the offer."
-    ),
-)
+    # Assess each buildable node
+    node_assessments = []
+    for node_id in buildable_nodes[:5]:  # Limit to top 5
+        tiles = board.map.adjacent_tiles.get(node_id, [])
+        resources = []
+        total_prob = 0
+        for tile in tiles:
+            if isinstance(tile, LandTile) and tile.resource:
+                from catanatron.models.map import number_probability
 
-initiate_negotiation_tool = Tool(
-    initiate_negotiation,
-    name="initiate_negotiation",
-    description=(
-        "Start a negotiation chat with other LLM players before making a trade offer. "
-        "Allows discussing trades before committing. Can only be done once per turn."
-    ),
-)
+                prob = number_probability(tile.number) if tile.number else 0
+                resources.append(
+                    {"resource": tile.resource, "number": tile.number, "probability": prob}
+                )
+                total_prob += prob
 
-send_message_tool = Tool(
-    send_message,
-    name="send_message",
-    description=(
-        "Send a message to other players during negotiation. "
-        "Use to communicate trading intentions or negotiate terms."
-    ),
-)
+        node_assessments.append(
+            {
+                "node_id": node_id,
+                "resources": resources,
+                "total_production_probability": round(total_prob, 3),
+            }
+        )
 
-leave_negotiation_tool = Tool(
-    leave_negotiation,
-    name="leave_negotiation",
-    description=(
-        "Exit the current negotiation early without making a trade offer."
-    ),
-)
+    # Sort by production
+    node_assessments.sort(
+        key=lambda x: x["total_production_probability"], reverse=True
+    )
+
+    return {
+        "buildable_settlement_locations": len(buildable_nodes),
+        "buildable_road_locations": len(buildable_edges),
+        "best_settlement_spots": node_assessments,
+        "expansion_advice": (
+            "Focus on high-probability numbers (6, 8, 5, 9) and resource diversity"
+            if buildable_nodes
+            else "No settlement spots available - build roads to expand"
+        ),
+    }
 
 
-# ============ Toolsets ============
+def _analyze_blocking(game, my_color) -> Dict[str, Any]:
+    """Analyze blocking opportunities."""
+    state = game.state
+    board = state.board
 
-# Analysis-only toolset
-ANALYSIS_TOOLSET = [
-    game_analysis_tool,
-    board_analysis_tool,
-]
+    blocking_opportunities = []
+    for color in state.colors:
+        if color == my_color:
+            continue
 
-# Trade tools (initiation and offer)
-TRADE_TOOLSET = [
-    trade_offer_tool,
-    initiate_negotiation_tool,
-]
+        their_buildable = list(board.buildable_node_ids(color, initial_build_phase=False))
+        my_buildable = set(board.buildable_node_ids(my_color))
 
-# Chat tools for during negotiation
-CHAT_TOOLSET = [
-    send_message_tool,
-    leave_negotiation_tool,
-]
+        overlap = [n for n in their_buildable if n in my_buildable]
+        if overlap:
+            blocking_opportunities.append(
+                {
+                    "opponent": color.value,
+                    "blockable_nodes": overlap[:3],
+                    "their_vps": get_visible_victory_points(state, color),
+                }
+            )
+
+    return {
+        "blocking_opportunities": blocking_opportunities,
+        "advice": (
+            "Consider blocking the leading player's expansion"
+            if blocking_opportunities
+            else "No immediate blocking opportunities"
+        ),
+    }
+
+
+def _analyze_ports(game, my_color) -> Dict[str, Any]:
+    """Analyze port access and trading."""
+    board = game.state.board
+    my_ports = list(board.get_player_port_resources(my_color))
+
+    port_info = {
+        "current_ports": my_ports,
+        "has_3_to_1_port": None in my_ports,
+        "specialized_ports": [p for p in my_ports if p is not None],
+    }
+
+    # Determine trading rates
+    rates = {"wood": 4, "brick": 4, "sheep": 4, "wheat": 4, "ore": 4}
+    if None in my_ports:
+        rates = {r: 3 for r in rates}
+    for port_resource in my_ports:
+        if port_resource:
+            rates[port_resource.lower()] = 2
+
+    port_info["trading_rates"] = rates
+    port_info["advice"] = (
+        "Good port access - consider using maritime trades"
+        if len(my_ports) > 0
+        else "No ports yet - consider building towards coastal settlements"
+    )
+
+    return port_info
+
+
+def _analyze_robber(game, my_color) -> Dict[str, Any]:
+    """Analyze robber placement options."""
+    state = game.state
+    board = state.board
+
+    placements = []
+    for coord, tile in board.map.tiles.items():
+        if not isinstance(tile, LandTile) or tile.resource is None:
+            continue
+        if coord == board.robber_coordinate:
+            continue
+
+        affected = {}
+        for node_id in tile.nodes.values():
+            building = board.buildings.get(node_id)
+            if building:
+                color, btype = building
+                if color != my_color:
+                    if color.value not in affected:
+                        affected[color.value] = 0
+                    affected[color.value] += 2 if btype == CITY else 1
+
+        if affected:
+            from catanatron.models.map import number_probability
+
+            prob = number_probability(tile.number) if tile.number else 0
+            placements.append(
+                {
+                    "coordinate": coord,
+                    "resource": tile.resource,
+                    "number": tile.number,
+                    "probability": prob,
+                    "affected_players": affected,
+                    "total_impact": sum(affected.values()) * prob,
+                }
+            )
+
+    placements.sort(key=lambda x: x["total_impact"], reverse=True)
+
+    return {
+        "best_robber_placements": placements[:5],
+        "current_robber_location": board.robber_coordinate,
+        "advice": "Target the leading player's highest-production tile",
+    }
+
+
+# ============================================================================
+# Toolset Definitions using FunctionToolset
+# ============================================================================
+
+def create_analysis_toolset() -> FunctionToolset:
+    """Create toolset with game analysis tools."""
+    toolset = FunctionToolset()
+    
+    @toolset.tool
+    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Get comprehensive game state, available actions, and strategy recommendation.
+        
+        Use this tool FIRST on every turn to understand the current game situation
+        before making any decisions.
+        """
+        return _get_game_and_action_analysis(ctx)
+    
+    @toolset.tool
+    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+        """
+        Analyze the board for strategic insights.
+
+        Args:
+            focus: What to analyze. Options:
+                - 'expansion': Where can I build next, best spots
+                - 'blocking': How to block opponents' expansion
+                - 'ports': Port accessibility and trading options
+                - 'robber': Optimal robber placements
+        """
+        return _analyze_board(ctx, focus)
+    
+    return toolset
+
+
+def create_trade_toolset() -> FunctionToolset:
+    """Create toolset with trade-related tools."""
+    toolset = FunctionToolset()
+    
+    @toolset.tool
+    def trade_offer(
+        ctx: RunContext[CatanDependencies], 
+        offer: List[int], 
+        ask: List[int]
+    ) -> Dict[str, Any]:
+        """
+        Make a formal trade offer to other players.
+        
+        Args:
+            offer: Resources you are offering [wood, brick, sheep, wheat, ore]
+            ask: Resources you want in return [wood, brick, sheep, wheat, ore]
+        """
+        return _make_trade_offer(ctx, offer, ask)
+    
+    @toolset.tool
+    def initiate_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Start a negotiation chat with other LLM players before making a trade offer.
+        
+        This opens a shared chat room where you can discuss potential trades
+        with other players. You can only initiate one negotiation per turn.
+        """
+        return _initiate_negotiation(ctx)
+    
+    return toolset
+
+
+def create_chat_toolset() -> FunctionToolset:
+    """Create toolset with negotiation chat tools."""
+    toolset = FunctionToolset()
+    
+    @toolset.tool
+    def send_message(ctx: RunContext[CatanDependencies], message: str) -> Dict[str, Any]:
+        """
+        Send a message to other players during negotiation.
+        
+        Args:
+            message: Your message to other players (free-form natural language)
+        """
+        return _send_message(ctx, message)
+    
+    @toolset.tool
+    def leave_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Exit the current negotiation early.
+        
+        Use this if you don't want to continue participating in the negotiation.
+        """
+        return _leave_negotiation(ctx)
+    
+    return toolset
+
+
+# ============================================================================
+# Pre-built Combined Toolsets
+# ============================================================================
+
+# Create singleton instances of toolsets
+ANALYSIS_TOOLSET = create_analysis_toolset()
+TRADE_TOOLSET = create_trade_toolset()
+CHAT_TOOLSET = create_chat_toolset()
 
 # Combined toolsets for common scenarios
+def create_normal_play_toolset() -> FunctionToolset:
+    """Create toolset for normal gameplay (analysis only)."""
+    toolset = FunctionToolset()
+    
+    @toolset.tool
+    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Get comprehensive game state, available actions, and strategy recommendation.
+        
+        Use this tool FIRST on every turn to understand the current game situation.
+        """
+        return _get_game_and_action_analysis(ctx)
+    
+    @toolset.tool
+    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+        """
+        Analyze the board for strategic insights.
 
-# Normal gameplay without trade options
-NORMAL_PLAY_TOOLSET = [
-    game_analysis_tool,
-    board_analysis_tool,
-]
-
-# Normal gameplay with trade options available
-NORMAL_PLAY_WITH_TRADE_TOOLSET = [
-    game_analysis_tool,
-    board_analysis_tool,
-    trade_offer_tool,
-    initiate_negotiation_tool,
-]
-
-# For players participating in an active negotiation (not the initiator)
-NEGOTIATION_PARTICIPANT_TOOLSET = [
-    game_analysis_tool,
-    board_analysis_tool,
-    send_message_tool,
-    leave_negotiation_tool,
-]
-
-# For the initiator during negotiation (can send messages and make offers)
-NEGOTIATION_INITIATOR_TOOLSET = [
-    game_analysis_tool,
-    board_analysis_tool,
-    send_message_tool,
-    leave_negotiation_tool,
-    trade_offer_tool,
-]
+        Args:
+            focus: 'expansion', 'blocking', 'ports', or 'robber'
+        """
+        return _analyze_board(ctx, focus)
+    
+    return toolset
 
 
-def get_all_tools() -> List[Tool]:
-    """Return all available tools for registration."""
+def create_normal_play_with_trade_toolset() -> FunctionToolset:
+    """Create toolset for normal gameplay with trade tools (after rolling)."""
+    toolset = FunctionToolset()
+    
+    @toolset.tool
+    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Get comprehensive game state, available actions, and strategy recommendation.
+        
+        Use this tool FIRST on every turn to understand the current game situation.
+        """
+        return _get_game_and_action_analysis(ctx)
+    
+    @toolset.tool
+    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+        """
+        Analyze the board for strategic insights.
+
+        Args:
+            focus: 'expansion', 'blocking', 'ports', or 'robber'
+        """
+        return _analyze_board(ctx, focus)
+    
+    @toolset.tool
+    def trade_offer(
+        ctx: RunContext[CatanDependencies], 
+        offer: List[int], 
+        ask: List[int]
+    ) -> Dict[str, Any]:
+        """
+        Make a formal trade offer to other players.
+        
+        Args:
+            offer: Resources you are offering [wood, brick, sheep, wheat, ore]
+            ask: Resources you want in return [wood, brick, sheep, wheat, ore]
+        """
+        return _make_trade_offer(ctx, offer, ask)
+    
+    @toolset.tool
+    def initiate_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Start a negotiation chat with other LLM players before making a trade offer.
+        """
+        return _initiate_negotiation(ctx)
+    
+    return toolset
+
+
+def create_negotiation_participant_toolset() -> FunctionToolset:
+    """Create toolset for participants in a negotiation."""
+    toolset = FunctionToolset()
+    
+    @toolset.tool
+    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Get comprehensive game state, available actions, and strategy recommendation.
+        """
+        return _get_game_and_action_analysis(ctx)
+    
+    @toolset.tool
+    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+        """
+        Analyze the board for strategic insights.
+
+        Args:
+            focus: 'expansion', 'blocking', 'ports', or 'robber'
+        """
+        return _analyze_board(ctx, focus)
+    
+    @toolset.tool
+    def send_message(ctx: RunContext[CatanDependencies], message: str) -> Dict[str, Any]:
+        """
+        Send a message to other players during negotiation.
+        
+        Args:
+            message: Your message to other players
+        """
+        return _send_message(ctx, message)
+    
+    @toolset.tool
+    def leave_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Exit the current negotiation early.
+        """
+        return _leave_negotiation(ctx)
+    
+    return toolset
+
+
+def create_negotiation_initiator_toolset() -> FunctionToolset:
+    """Create toolset for the player who initiated the negotiation."""
+    toolset = FunctionToolset()
+    
+    @toolset.tool
+    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+        """
+        Get comprehensive game state, available actions, and strategy recommendation.
+        """
+        return _get_game_and_action_analysis(ctx)
+    
+    @toolset.tool
+    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+        """
+        Analyze the board for strategic insights.
+
+        Args:
+            focus: 'expansion', 'blocking', 'ports', or 'robber'
+        """
+        return _analyze_board(ctx, focus)
+    
+    @toolset.tool
+    def send_message(ctx: RunContext[CatanDependencies], message: str) -> Dict[str, Any]:
+        """
+        Send a message to other players during negotiation.
+        
+        Args:
+            message: Your message to other players
+        """
+        return _send_message(ctx, message)
+    
+    @toolset.tool
+    def trade_offer(
+        ctx: RunContext[CatanDependencies], 
+        offer: List[int], 
+        ask: List[int]
+    ) -> Dict[str, Any]:
+        """
+        Make a formal trade offer to end the negotiation.
+        
+        Args:
+            offer: Resources you are offering [wood, brick, sheep, wheat, ore]
+            ask: Resources you want in return [wood, brick, sheep, wheat, ore]
+        """
+        return _make_trade_offer(ctx, offer, ask)
+    
+    return toolset
+
+
+# Pre-built combined toolset instances
+NORMAL_PLAY_TOOLSET = create_normal_play_toolset()
+NORMAL_PLAY_WITH_TRADE_TOOLSET = create_normal_play_with_trade_toolset()
+NEGOTIATION_PARTICIPANT_TOOLSET = create_negotiation_participant_toolset()
+NEGOTIATION_INITIATOR_TOOLSET = create_negotiation_initiator_toolset()
+
+
+# ============================================================================
+# Deprecated/Compatibility Exports
+# ============================================================================
+
+# Alias for backward compatibility
+NegotiationDependencies = None  # Deprecated: Use CatanDependencies instead
+
+
+def get_all_tools() -> List[FunctionToolset]:
+    """
+    Get all available toolsets.
+    
+    Deprecated: Use specific toolsets directly instead.
+    
+    Returns:
+        List of all toolset instances
+    """
     return [
-        game_analysis_tool,
-        board_analysis_tool,
-        trade_offer_tool,
-        initiate_negotiation_tool,
-        send_message_tool,
-        leave_negotiation_tool,
+        ANALYSIS_TOOLSET,
+        TRADE_TOOLSET,
+        CHAT_TOOLSET,
+        NORMAL_PLAY_TOOLSET,
+        NORMAL_PLAY_WITH_TRADE_TOOLSET,
+        NEGOTIATION_PARTICIPANT_TOOLSET,
+        NEGOTIATION_INITIATOR_TOOLSET,
     ]
+
+
+# ============================================================================
+# Toolset Selection Helper
+# ============================================================================
+
+def get_toolsets_for_game_state(
+    game,
+    color,
+    has_rolled: bool,
+    is_my_turn: bool,
+    in_negotiation: bool = False,
+    is_negotiation_initiator: bool = False,
+    negotiation_enabled: bool = True,
+) -> List[FunctionToolset]:
+    """
+    Select appropriate toolsets based on game state.
+    
+    Args:
+        game: The current game instance
+        color: The player's color
+        has_rolled: Whether the player has rolled this turn
+        is_my_turn: Whether it's currently this player's turn
+        in_negotiation: Whether currently in a negotiation session
+        is_negotiation_initiator: Whether this player initiated the negotiation
+        negotiation_enabled: Whether negotiation feature is enabled
+    
+    Returns:
+        List of FunctionToolset instances to use for agent.run()
+    """
+    if in_negotiation:
+        if is_negotiation_initiator:
+            return [NEGOTIATION_INITIATOR_TOOLSET]
+        else:
+            return [NEGOTIATION_PARTICIPANT_TOOLSET]
+    
+    # Normal gameplay
+    if is_my_turn and has_rolled and negotiation_enabled:
+        return [NORMAL_PLAY_WITH_TRADE_TOOLSET]
+    else:
+        return [NORMAL_PLAY_TOOLSET]

@@ -684,8 +684,8 @@ class TestNegotiationWithTestModel:
         # Player should have reference to manager
         assert llm_player.negotiation_manager is manager
 
-    def test_negotiation_session_creation(self):
-        """Test starting a negotiation session."""
+    def test_can_initiate_negotiation(self):
+        """Test can_initiate checks."""
         from catanatron.players.llm.negotiation import setup_negotiation
         from catanatron.players.llm_player import PydanticAIPlayer
         
@@ -695,13 +695,209 @@ class TestNegotiationWithTestModel:
         game = Game([player1, player2], seed=42)
         manager = setup_negotiation(game)
         
-        # Start negotiation
-        session = manager.start_negotiation(Color.RED, game)
+        turn = game.state.num_turns
         
-        assert session.initiator == Color.RED
-        assert Color.RED in session.participants
-        assert Color.BLUE in session.participants
-        assert session.is_active is True
+        # Should be able to initiate initially
+        assert manager.can_initiate(Color.RED, turn) is True
+        
+        # Mark as initiated
+        if turn not in manager.initiated_this_turn:
+            manager.initiated_this_turn[turn] = set()
+        manager.initiated_this_turn[turn].add(Color.RED)
+        
+        # Should not be able to initiate again this turn
+        assert manager.can_initiate(Color.RED, turn) is False
+        
+        # Other player can still initiate
+        assert manager.can_initiate(Color.BLUE, turn) is True
+    
+    def test_negotiation_message(self):
+        """Test NegotiationMessage creation."""
+        from catanatron.players.llm.negotiation import NegotiationMessage
+        
+        msg = NegotiationMessage(
+            sender=Color.RED,
+            content="I need wheat!"
+        )
+        
+        assert msg.sender == Color.RED
+        assert msg.content == "I need wheat!"
+        assert msg.timestamp > 0
+        
+        # Test to_dict
+        d = msg.to_dict()
+        assert d["sender"] == "RED"
+        assert d["content"] == "I need wheat!"
+
+
+# ============= Toolset Tests =============
+
+
+class TestToolsets:
+    """Tests for the toolset functionality."""
+
+    def test_analysis_toolset_exists(self):
+        """Test ANALYSIS_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import ANALYSIS_TOOLSET
+        from pydantic_ai.toolsets import FunctionToolset
+        
+        assert isinstance(ANALYSIS_TOOLSET, FunctionToolset)
+
+    def test_trade_toolset_exists(self):
+        """Test TRADE_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import TRADE_TOOLSET
+        from pydantic_ai.toolsets import FunctionToolset
+        
+        assert isinstance(TRADE_TOOLSET, FunctionToolset)
+
+    def test_chat_toolset_exists(self):
+        """Test CHAT_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import CHAT_TOOLSET
+        from pydantic_ai.toolsets import FunctionToolset
+        
+        assert isinstance(CHAT_TOOLSET, FunctionToolset)
+
+    def test_normal_play_toolset(self):
+        """Test NORMAL_PLAY_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import NORMAL_PLAY_TOOLSET
+        from pydantic_ai.toolsets import FunctionToolset
+        
+        assert isinstance(NORMAL_PLAY_TOOLSET, FunctionToolset)
+
+    def test_normal_play_with_trade_toolset(self):
+        """Test NORMAL_PLAY_WITH_TRADE_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import NORMAL_PLAY_WITH_TRADE_TOOLSET
+        from pydantic_ai.toolsets import FunctionToolset
+        
+        assert isinstance(NORMAL_PLAY_WITH_TRADE_TOOLSET, FunctionToolset)
+
+    def test_negotiation_participant_toolset(self):
+        """Test NEGOTIATION_PARTICIPANT_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import NEGOTIATION_PARTICIPANT_TOOLSET
+        from pydantic_ai.toolsets import FunctionToolset
+        
+        assert isinstance(NEGOTIATION_PARTICIPANT_TOOLSET, FunctionToolset)
+
+    def test_negotiation_initiator_toolset(self):
+        """Test NEGOTIATION_INITIATOR_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import NEGOTIATION_INITIATOR_TOOLSET
+        from pydantic_ai.toolsets import FunctionToolset
+        
+        assert isinstance(NEGOTIATION_INITIATOR_TOOLSET, FunctionToolset)
+
+    def test_get_toolsets_for_game_state_normal_play(self):
+        """Test get_toolsets_for_game_state returns correct toolsets for normal play."""
+        from catanatron.players.llm.toolsets import (
+            get_toolsets_for_game_state,
+            NORMAL_PLAY_TOOLSET,
+        )
+        
+        toolsets = get_toolsets_for_game_state(
+            game=None,
+            color=Color.RED,
+            has_rolled=False,
+            is_my_turn=True,
+            in_negotiation=False,
+        )
+        
+        assert NORMAL_PLAY_TOOLSET in toolsets
+
+    def test_get_toolsets_for_game_state_with_trade(self):
+        """Test get_toolsets_for_game_state returns trade tools after rolling."""
+        from catanatron.players.llm.toolsets import (
+            get_toolsets_for_game_state,
+            NORMAL_PLAY_WITH_TRADE_TOOLSET,
+        )
+        
+        toolsets = get_toolsets_for_game_state(
+            game=None,
+            color=Color.RED,
+            has_rolled=True,
+            is_my_turn=True,
+            in_negotiation=False,
+            negotiation_enabled=True,
+        )
+        
+        assert NORMAL_PLAY_WITH_TRADE_TOOLSET in toolsets
+
+    def test_get_toolsets_for_game_state_negotiation_initiator(self):
+        """Test get_toolsets_for_game_state returns initiator toolset."""
+        from catanatron.players.llm.toolsets import (
+            get_toolsets_for_game_state,
+            NEGOTIATION_INITIATOR_TOOLSET,
+        )
+        
+        toolsets = get_toolsets_for_game_state(
+            game=None,
+            color=Color.RED,
+            has_rolled=True,
+            is_my_turn=True,
+            in_negotiation=True,
+            is_negotiation_initiator=True,
+        )
+        
+        assert NEGOTIATION_INITIATOR_TOOLSET in toolsets
+
+    def test_get_toolsets_for_game_state_negotiation_participant(self):
+        """Test get_toolsets_for_game_state returns participant toolset."""
+        from catanatron.players.llm.toolsets import (
+            get_toolsets_for_game_state,
+            NEGOTIATION_PARTICIPANT_TOOLSET,
+        )
+        
+        toolsets = get_toolsets_for_game_state(
+            game=None,
+            color=Color.BLUE,
+            has_rolled=False,
+            is_my_turn=False,
+            in_negotiation=True,
+            is_negotiation_initiator=False,
+        )
+        
+        assert NEGOTIATION_PARTICIPANT_TOOLSET in toolsets
+
+
+class TestToolsetSelection:
+    """Tests for toolset selection in BaseLLMPlayer."""
+
+    def test_select_toolsets_before_rolling(self, game_after_initial_placement):
+        """Test _select_toolsets returns analysis-only before rolling."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        from catanatron.players.llm.toolsets import NORMAL_PLAY_TOOLSET
+        
+        game = game_after_initial_placement
+        player = PydanticAIPlayer(Color.RED, model=TestModel())
+        
+        # Game is in initial state, player hasn't rolled
+        toolsets = player._select_toolsets(game)
+        
+        # Should return normal play toolset (no trade)
+        assert NORMAL_PLAY_TOOLSET in toolsets
+
+    def test_can_trade_before_rolling(self, game_after_initial_placement):
+        """Test _can_trade returns False before rolling."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        game = game_after_initial_placement
+        player = PydanticAIPlayer(Color.RED, model=TestModel())
+        
+        # Player hasn't rolled, should not be able to trade
+        assert player._can_trade(game) is False
+
+    def test_can_trade_after_rolling(self, game_at_play_turn):
+        """Test _can_trade returns True after rolling on player's turn."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        game = game_at_play_turn
+        
+        # Create player with the color of current turn
+        current_color = game.state.colors[game.state.current_turn_index]
+        player = PydanticAIPlayer(current_color, model=TestModel())
+        
+        # Check if player has rolled and it's their turn
+        from catanatron.state_functions import player_has_rolled
+        if player_has_rolled(game.state, current_color):
+            assert player._can_trade(game) is True
 
 
 # ============= Integration Tests =============
