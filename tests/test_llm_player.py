@@ -192,6 +192,20 @@ class TestOutputTypes:
         assert output.action_type == "BUILD_SETTLEMENT"
         assert output.node_id == 42
 
+    def test_chat_response(self):
+        """Test ChatResponse output type for chat agent."""
+        from catanatron.players.llm.output_types import ChatResponse
+
+        # Default values
+        response = ChatResponse()
+        assert response.acknowledged is True
+        assert response.reasoning is None
+
+        # With reasoning
+        response = ChatResponse(acknowledged=True, reasoning="Good trade")
+        assert response.acknowledged is True
+        assert response.reasoning == "Good trade"
+
 
 class TestCatanDependencies:
     """Tests for the dependencies dataclass."""
@@ -555,6 +569,19 @@ class TestPlayerWithTestModel:
         assert player.color == Color.RED
         assert isinstance(player._model, TestModel)
 
+    def test_player_has_chat_agent(self):
+        """Test player has both agent and chat_agent."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        from pydantic_ai import Agent
+        
+        player = PydanticAIPlayer(Color.RED, model=TestModel())
+        
+        # Verify both agents exist
+        assert hasattr(player, 'agent')
+        assert hasattr(player, 'chat_agent')
+        assert isinstance(player.agent, Agent)
+        assert isinstance(player.chat_agent, Agent)
+
     def test_player_with_model_config(self):
         """Test creating a player with ModelConfig."""
         from catanatron.players.llm_player import PydanticAIPlayer
@@ -736,143 +763,86 @@ class TestNegotiationWithTestModel:
 class TestToolsets:
     """Tests for the toolset functionality."""
 
-    def test_analysis_toolset_exists(self):
-        """Test ANALYSIS_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import ANALYSIS_TOOLSET
+    def test_reasoning_toolset_exists(self):
+        """Test REASONING_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import REASONING_TOOLSET
         from pydantic_ai.toolsets import FunctionToolset
         
-        assert isinstance(ANALYSIS_TOOLSET, FunctionToolset)
+        assert isinstance(REASONING_TOOLSET, FunctionToolset)
 
-    def test_trade_toolset_exists(self):
-        """Test TRADE_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import TRADE_TOOLSET
+    def test_chat_initiator_toolset_exists(self):
+        """Test CHAT_INITIATOR_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import CHAT_INITIATOR_TOOLSET
         from pydantic_ai.toolsets import FunctionToolset
         
-        assert isinstance(TRADE_TOOLSET, FunctionToolset)
+        assert isinstance(CHAT_INITIATOR_TOOLSET, FunctionToolset)
 
-    def test_chat_toolset_exists(self):
-        """Test CHAT_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import CHAT_TOOLSET
+    def test_chat_participant_toolset_exists(self):
+        """Test CHAT_PARTICIPANT_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import CHAT_PARTICIPANT_TOOLSET
         from pydantic_ai.toolsets import FunctionToolset
         
-        assert isinstance(CHAT_TOOLSET, FunctionToolset)
+        assert isinstance(CHAT_PARTICIPANT_TOOLSET, FunctionToolset)
 
-    def test_normal_play_toolset(self):
-        """Test NORMAL_PLAY_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import NORMAL_PLAY_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(NORMAL_PLAY_TOOLSET, FunctionToolset)
-
-    def test_normal_play_with_trade_toolset(self):
-        """Test NORMAL_PLAY_WITH_TRADE_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import NORMAL_PLAY_WITH_TRADE_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(NORMAL_PLAY_WITH_TRADE_TOOLSET, FunctionToolset)
-
-    def test_negotiation_participant_toolset(self):
-        """Test NEGOTIATION_PARTICIPANT_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import NEGOTIATION_PARTICIPANT_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(NEGOTIATION_PARTICIPANT_TOOLSET, FunctionToolset)
-
-    def test_negotiation_initiator_toolset(self):
-        """Test NEGOTIATION_INITIATOR_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import NEGOTIATION_INITIATOR_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(NEGOTIATION_INITIATOR_TOOLSET, FunctionToolset)
-
-    def test_get_toolsets_for_game_state_normal_play(self):
-        """Test get_toolsets_for_game_state returns correct toolsets for normal play."""
+    def test_get_toolset_for_context_reasoning(self):
+        """Test get_toolset_for_context returns REASONING_TOOLSET for normal play."""
         from catanatron.players.llm.toolsets import (
-            get_toolsets_for_game_state,
-            NORMAL_PLAY_TOOLSET,
+            get_toolset_for_context,
+            REASONING_TOOLSET,
         )
         
-        toolsets = get_toolsets_for_game_state(
-            game=None,
-            color=Color.RED,
-            has_rolled=False,
-            is_my_turn=True,
-            in_negotiation=False,
+        toolset = get_toolset_for_context(
+            is_negotiation=False,
+            is_initiator=False,
         )
         
-        assert NORMAL_PLAY_TOOLSET in toolsets
+        assert toolset is REASONING_TOOLSET
 
-    def test_get_toolsets_for_game_state_with_trade(self):
-        """Test get_toolsets_for_game_state returns trade tools after rolling."""
+    def test_get_toolset_for_context_chat_initiator(self):
+        """Test get_toolset_for_context returns CHAT_INITIATOR_TOOLSET for initiator."""
         from catanatron.players.llm.toolsets import (
-            get_toolsets_for_game_state,
-            NORMAL_PLAY_WITH_TRADE_TOOLSET,
+            get_toolset_for_context,
+            CHAT_INITIATOR_TOOLSET,
         )
         
-        toolsets = get_toolsets_for_game_state(
-            game=None,
-            color=Color.RED,
-            has_rolled=True,
-            is_my_turn=True,
-            in_negotiation=False,
-            negotiation_enabled=True,
+        toolset = get_toolset_for_context(
+            is_negotiation=True,
+            is_initiator=True,
         )
         
-        assert NORMAL_PLAY_WITH_TRADE_TOOLSET in toolsets
+        assert toolset is CHAT_INITIATOR_TOOLSET
 
-    def test_get_toolsets_for_game_state_negotiation_initiator(self):
-        """Test get_toolsets_for_game_state returns initiator toolset."""
+    def test_get_toolset_for_context_chat_participant(self):
+        """Test get_toolset_for_context returns CHAT_PARTICIPANT_TOOLSET for participant."""
         from catanatron.players.llm.toolsets import (
-            get_toolsets_for_game_state,
-            NEGOTIATION_INITIATOR_TOOLSET,
+            get_toolset_for_context,
+            CHAT_PARTICIPANT_TOOLSET,
         )
         
-        toolsets = get_toolsets_for_game_state(
-            game=None,
-            color=Color.RED,
-            has_rolled=True,
-            is_my_turn=True,
-            in_negotiation=True,
-            is_negotiation_initiator=True,
+        toolset = get_toolset_for_context(
+            is_negotiation=True,
+            is_initiator=False,
         )
         
-        assert NEGOTIATION_INITIATOR_TOOLSET in toolsets
-
-    def test_get_toolsets_for_game_state_negotiation_participant(self):
-        """Test get_toolsets_for_game_state returns participant toolset."""
-        from catanatron.players.llm.toolsets import (
-            get_toolsets_for_game_state,
-            NEGOTIATION_PARTICIPANT_TOOLSET,
-        )
-        
-        toolsets = get_toolsets_for_game_state(
-            game=None,
-            color=Color.BLUE,
-            has_rolled=False,
-            is_my_turn=False,
-            in_negotiation=True,
-            is_negotiation_initiator=False,
-        )
-        
-        assert NEGOTIATION_PARTICIPANT_TOOLSET in toolsets
+        assert toolset is CHAT_PARTICIPANT_TOOLSET
 
 
 class TestToolsetSelection:
     """Tests for toolset selection in BaseLLMPlayer."""
 
-    def test_select_toolsets_before_rolling(self, game_after_initial_placement):
-        """Test _select_toolsets returns analysis-only before rolling."""
+    def test_select_toolsets_returns_reasoning(self, game_after_initial_placement):
+        """Test _select_toolsets always returns REASONING_TOOLSET."""
         from catanatron.players.llm_player import PydanticAIPlayer
-        from catanatron.players.llm.toolsets import NORMAL_PLAY_TOOLSET
+        from catanatron.players.llm.toolsets import REASONING_TOOLSET
         
         game = game_after_initial_placement
         player = PydanticAIPlayer(Color.RED, model=TestModel())
         
-        # Game is in initial state, player hasn't rolled
+        # _select_toolsets always returns REASONING_TOOLSET for the main agent
         toolsets = player._select_toolsets(game)
         
-        # Should return normal play toolset (no trade)
-        assert NORMAL_PLAY_TOOLSET in toolsets
+        # Should return reasoning toolset
+        assert REASONING_TOOLSET in toolsets
 
     def test_can_trade_before_rolling(self, game_after_initial_placement):
         """Test _can_trade returns False before rolling."""

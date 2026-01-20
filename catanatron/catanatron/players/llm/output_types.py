@@ -215,6 +215,27 @@ StructuredActionOutput = Union[
 ActionOutput = Union[ActionByIndex, StructuredActionOutput]
 
 
+# ============= Chat Agent Output =============
+
+
+class ChatResponse(BaseModel):
+    """
+    Response from the chat agent during negotiation.
+    
+    The chat agent uses tools (send_message, trade_offer, leave_negotiation)
+    to perform actions. This output type captures any final state/acknowledgment.
+    """
+    
+    acknowledged: bool = Field(
+        default=True,
+        description="Whether the agent acknowledges completing its turn"
+    )
+    reasoning: Optional[str] = Field(
+        default=None,
+        description="Brief explanation of the negotiation strategy"
+    )
+
+
 # ============= Helper to map action type string to model =============
 
 ACTION_TYPE_TO_MODEL = {

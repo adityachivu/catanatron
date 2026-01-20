@@ -20,7 +20,7 @@ from catanatron.game import Game
 from catanatron.models.player import Player, Color
 from catanatron.models.enums import Action, ActionPrompt, ActionType
 
-from catanatron.players.llm.output_types import ActionByIndex
+from catanatron.players.llm.output_types import ActionByIndex, ChatResponse
 from catanatron.players.llm.history import ConversationHistoryManager
 from catanatron.players.llm.models import create_model, ModelConfig, ModelInput
 from catanatron.state_functions import player_has_rolled
@@ -83,6 +83,38 @@ If a strategy advisor recommendation is provided, take it into consideration but
 Always return a valid action from the available options."""
 
 
+# System prompt for the chat agent during negotiations
+CHAT_SYSTEM_PROMPT = """You are negotiating a trade in Settlers of Catan.
+
+## Your Goal
+Negotiate beneficial trades with other players. You want to:
+- Get resources you need for your strategy
+- Give away resources you have in excess
+- Avoid helping opponents who are close to winning
+
+## Negotiation Guidelines
+1. Start by reviewing your resources with get_game_and_action_analysis
+2. Use send_message to communicate with other players
+3. Be specific about what you want and what you're offering
+4. Consider the game state - don't help players who are about to win
+
+## As the Initiator
+- You started this negotiation, so you control when it ends
+- Discuss terms with other players using send_message
+- When ready, use trade_offer to make a formal offer and end the negotiation
+- The formal offer doesn't have to match what was discussed - but honoring your word builds trust
+
+## As a Participant
+- Respond to the initiator's proposals
+- Make counter-offers or express interest in different trades
+- If the trade doesn't benefit you, use leave_negotiation to exit
+
+## Communication Tips
+- Be concise and clear about resource needs
+- Example: "I need wheat for a city. I can offer 2 sheep or 1 ore."
+- Don't reveal too much about your strategy"""
+
+
 class BaseLLMPlayer(Player):
     """
     Base class for LLM-powered players.
@@ -107,6 +139,7 @@ class BaseLLMPlayer(Player):
     negotiation_history: List["NegotiationMessage"]
     _pending_trade_action: Optional[Action]
     _last_negotiation_turn: int
+    chat_agent: Agent  # Separate agent for negotiation chat
 
     def __init__(
         self,
@@ -166,8 +199,9 @@ class BaseLLMPlayer(Player):
         self._pending_trade_action: Optional[Action] = None
         self._last_negotiation_turn: int = -1
 
-        # Create the agent - defer to allow subclasses to customize
+        # Create the agents - defer to allow subclasses to customize
         self.agent = self._create_agent()
+        self.chat_agent = self._create_chat_agent()
     
     @property
     def model(self) -> Union[Model, str]:
@@ -176,26 +210,41 @@ class BaseLLMPlayer(Player):
     
     @model.setter
     def model(self, value: ModelInput) -> None:
-        """Set the model (recreates the agent)."""
+        """Set the model (recreates both agents)."""
         self._model = create_model(value)
         self._model_config = value if isinstance(value, ModelConfig) else None
         self.agent = self._create_agent()
+        self.chat_agent = self._create_chat_agent()
 
     def _create_agent(self) -> Agent:
         """
-        Create the PydanticAI agent.
+        Create the main reasoning PydanticAI agent.
         
-        Note: Tools are no longer registered here. Instead, they are passed
-        dynamically to agent.run_sync() based on game state via _select_tools().
+        This agent handles normal gameplay decisions. Tools are passed
+        dynamically to agent.run_sync() based on game state.
         """
-        # Use index-based output for simplicity and reliability
         agent = Agent(
-            self._model,  # Can be string or Model instance
+            self._model,
             deps_type=CatanDependencies,
             output_type=ActionByIndex,
             system_prompt=CATAN_SYSTEM_PROMPT,
         )
-
+        return agent
+    
+    def _create_chat_agent(self) -> Agent:
+        """
+        Create the chat agent for negotiation.
+        
+        This agent handles trade negotiations with other players.
+        It has a dedicated system prompt focused on negotiation strategy.
+        Uses ChatResponse output type since it primarily acts via tools.
+        """
+        agent = Agent(
+            self._model,
+            deps_type=CatanDependencies,
+            output_type=ChatResponse,
+            system_prompt=CHAT_SYSTEM_PROMPT,
+        )
         return agent
     
     def _get_model_settings(self) -> Optional[ModelSettings]:
@@ -239,13 +288,13 @@ class BaseLLMPlayer(Player):
     
     def _select_toolsets(self, game: Game) -> List[FunctionToolset]:
         """
-        Select appropriate toolsets based on current game state.
+        Select appropriate toolsets for the reasoning agent.
         
-        This method determines which toolsets should be available to the agent
-        for the current decision. Trade tools are only available when:
-        - It's the PLAY_TURN phase
-        - The player has already rolled
-        - They haven't already initiated a negotiation this turn
+        The reasoning agent always uses REASONING_TOOLSET which includes:
+        - Analysis tools (get_game_and_action_analysis, analyze_board)
+        - initiate_negotiation (when conditions allow)
+        
+        Note: trade_offer is NOT included - that's handled by the chat agent.
         
         Args:
             game: Current game instance
@@ -253,15 +302,9 @@ class BaseLLMPlayer(Player):
         Returns:
             List of FunctionToolset instances to pass to agent.run_sync()
         """
-        from catanatron.players.llm.toolsets import (
-            NORMAL_PLAY_TOOLSET,
-            NORMAL_PLAY_WITH_TRADE_TOOLSET,
-        )
+        from catanatron.players.llm.toolsets import REASONING_TOOLSET
         
-        if self._can_trade(game):
-            return [NORMAL_PLAY_WITH_TRADE_TOOLSET]
-        else:
-            return [NORMAL_PLAY_TOOLSET]
+        return [REASONING_TOOLSET]
     
     def _can_trade(self, game: Game) -> bool:
         """
@@ -571,12 +614,13 @@ class BaseLLMPlayer(Player):
         """
         Custom pickle serialization.
         
-        Exclude unpickleable objects (agent, history_manager, negotiation_manager)
+        Exclude unpickleable objects (agents, history_manager, negotiation_manager)
         that contain SSLContext, thread locks, and other non-serializable components.
         """
         state = self.__dict__.copy()
         # Remove unpickleable objects
         state.pop('agent', None)
+        state.pop('chat_agent', None)
         state.pop('history_manager', None)
         state.pop('negotiation_manager', None)
         state.pop('negotiation_history', None)
@@ -597,9 +641,10 @@ class BaseLLMPlayer(Player):
         # Recreate model if not preserved
         if self._model is None:
             self._model = create_model(None)
-        # Recreate the agent and history manager
+        # Recreate the agents and history manager
         self.history_manager = ConversationHistoryManager()
         self.agent = self._create_agent()
+        self.chat_agent = self._create_chat_agent()
         # Reset negotiation state
         self.negotiation_manager = None
         self.negotiation_history = []

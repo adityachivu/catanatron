@@ -47,17 +47,23 @@ Negotiation Support:
         game.play()
 
 Toolsets:
-    Tools are now managed via toolsets that can be dynamically selected at
-    runtime based on game state. Available toolsets:
+    Tools are managed via toolsets selected at runtime based on context:
     
-    - NORMAL_PLAY_TOOLSET: Analysis tools for normal gameplay
-    - NORMAL_PLAY_WITH_TRADE_TOOLSET: Analysis + trade tools
-    - NEGOTIATION_PARTICIPANT_TOOLSET: Tools for negotiation participants
-    - NEGOTIATION_INITIATOR_TOOLSET: Tools for negotiation initiators
+    - REASONING_TOOLSET: For main gameplay (analysis + initiate_negotiation)
+    - CHAT_INITIATOR_TOOLSET: For negotiation initiator (analysis + send_message + trade_offer)
+    - CHAT_PARTICIPANT_TOOLSET: For negotiation participants (analysis + send_message + leave_negotiation)
 """
 
-from catanatron.players.llm.base import BaseLLMPlayer, CatanDependencies
-from catanatron.players.llm.output_types import ActionOutput, ActionByIndex
+from catanatron.players.llm.base import (
+    BaseLLMPlayer,
+    CatanDependencies,
+    CHAT_SYSTEM_PROMPT,
+)
+from catanatron.players.llm.output_types import (
+    ActionOutput,
+    ActionByIndex,
+    ChatResponse,
+)
 from catanatron.players.llm.state_formatter import StateFormatter
 from catanatron.players.llm.history import ConversationHistoryManager
 
@@ -92,26 +98,22 @@ from catanatron.players.llm.negotiation import (
     setup_negotiation,
 )
 
-# Toolsets for external use/testing
+# Toolsets
 from catanatron.players.llm.toolsets import (
-    ANALYSIS_TOOLSET,
-    TRADE_TOOLSET,
-    CHAT_TOOLSET,
-    NORMAL_PLAY_TOOLSET,
-    NORMAL_PLAY_WITH_TRADE_TOOLSET,
-    NEGOTIATION_PARTICIPANT_TOOLSET,
-    NEGOTIATION_INITIATOR_TOOLSET,
-    NegotiationDependencies,
-    get_all_tools,
-    get_toolsets_for_game_state,
+    REASONING_TOOLSET,
+    CHAT_INITIATOR_TOOLSET,
+    CHAT_PARTICIPANT_TOOLSET,
+    get_toolset_for_context,
 )
 
 __all__ = [
     # Core player classes
     "BaseLLMPlayer",
     "CatanDependencies",
+    "CHAT_SYSTEM_PROMPT",
     "ActionOutput",
     "ActionByIndex",
+    "ChatResponse",
     "StateFormatter",
     "ConversationHistoryManager",
     
@@ -138,17 +140,11 @@ __all__ = [
     "NegotiationManager",
     "NegotiationSession",
     "NegotiationMessage",
-    "NegotiationDependencies",
     "setup_negotiation",
     
     # Toolsets
-    "ANALYSIS_TOOLSET",
-    "TRADE_TOOLSET",
-    "CHAT_TOOLSET",
-    "NORMAL_PLAY_TOOLSET",
-    "NORMAL_PLAY_WITH_TRADE_TOOLSET",
-    "NEGOTIATION_PARTICIPANT_TOOLSET",
-    "NEGOTIATION_INITIATOR_TOOLSET",
-    "get_all_tools",
-    "get_toolsets_for_game_state",
+    "REASONING_TOOLSET",
+    "CHAT_INITIATOR_TOOLSET",
+    "CHAT_PARTICIPANT_TOOLSET",
+    "get_toolset_for_context",
 ]

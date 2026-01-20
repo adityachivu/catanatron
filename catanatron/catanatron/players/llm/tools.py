@@ -1,99 +1,19 @@
 """
-PydanticAI tools for the Catan LLM agent.
+Helper functions for Catan LLM board analysis.
 
-DEPRECATED: This module's register_tools() function is deprecated.
-Use the toolsets module instead for dynamic tool selection.
-
-This module now primarily provides helper functions used by toolsets.py:
+This module provides helper functions used by toolsets.py for board analysis:
 - _analyze_expansion: Analyze expansion opportunities
-- _analyze_blocking: Analyze blocking opportunities
+- _analyze_blocking: Analyze blocking opportunities  
 - _analyze_ports: Analyze port access
 - _analyze_robber: Analyze robber placement options
 - _assess_threat: Assess opponent threat level
 """
 
-import warnings
 from typing import Dict, Any
-from pydantic_ai import Agent, RunContext
-
-from catanatron.players.llm.base import CatanDependencies
 
 from catanatron.state_functions import get_visible_victory_points
 from catanatron.models.enums import CITY
 from catanatron.models.map import LandTile
-from catanatron.players.llm.state_formatter import StateFormatter
-
-
-def register_tools(agent: Agent) -> None:
-    """
-    Register all tools with the agent.
-    
-    DEPRECATED: This function is deprecated. Tools are now managed via
-    toolsets and passed to agent.run_sync() dynamically based on game state.
-    
-    Use the toolsets module instead:
-        from catanatron.players.llm.toolsets import NORMAL_PLAY_TOOLSET
-        
-        result = agent.run_sync(prompt, deps=deps, tools=NORMAL_PLAY_TOOLSET)
-
-    Args:
-        agent: The PydanticAI agent to register tools on
-    """
-    warnings.warn(
-        "register_tools() is deprecated. Use toolsets module and pass tools "
-        "to agent.run_sync() instead. See catanatron.players.llm.toolsets.",
-        DeprecationWarning,
-        stacklevel=2
-    )
-    
-    # Keep the old implementation for backwards compatibility
-    @agent.tool()
-    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
-        """
-        Combine the analysis of the board into a single analysis.
-        """
-        full_analysis = {
-            "game_state": StateFormatter.format_full_state(ctx.deps.game, ctx.deps.color),
-            "available_actions": [StateFormatter.format_action(action, i) for i, action in enumerate(ctx.deps.playable_actions)],
-            "strategy_recommendation": ctx.deps.strategy_recommendation if ctx.deps.strategy_recommendation else "No strategy advisor configured",
-            "strategy_reasoning": ctx.deps.strategy_reasoning if ctx.deps.strategy_reasoning else "No detailed reasoning available",
-        }
-        return full_analysis
-
-    @agent.tool
-    def analyze_board(
-        ctx: RunContext[CatanDependencies], focus: str
-    ) -> Dict[str, Any]:
-        """
-        Analyze the board for strategic insights.
-
-        Args:
-            focus: What to analyze. Options:
-                - 'expansion': Where can I build next, best spots
-                - 'blocking': How to block opponents' expansion
-                - 'ports': Port accessibility and trading options
-                - 'robber': Optimal robber placements
-        """
-        game = ctx.deps.game
-        my_color = ctx.deps.color
-
-        if focus == "expansion":
-            return _analyze_expansion(game, my_color)
-        elif focus == "blocking":
-            return _analyze_blocking(game, my_color)
-        elif focus == "ports":
-            return _analyze_ports(game, my_color)
-        elif focus == "robber":
-            return _analyze_robber(game, my_color)
-        else:
-            return {
-                "error": f"Unknown focus: {focus}",
-                "valid_options": ["expansion", "blocking", "ports", "robber"],
-            }
-
-
-# ============ Helper Functions ============
-# These are used by both the deprecated register_tools() and the new toolsets module
 
 
 def _assess_threat(state, opponent_color, my_color) -> str:
@@ -121,7 +41,6 @@ def _analyze_expansion(game, my_color) -> Dict[str, Any]:
     # Assess each buildable node
     node_assessments = []
     for node_id in buildable_nodes[:5]:  # Limit to top 5
-        # Get production at this node
         tiles = board.map.adjacent_tiles.get(node_id, [])
         resources = []
         total_prob = 0

@@ -22,6 +22,8 @@ Usage:
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Any, TYPE_CHECKING
 import time
+import concurrent.futures
+import asyncio
 
 import logfire
 from pydantic_ai import RunContext, UsageLimits
@@ -308,13 +310,46 @@ class NegotiationManager:
                 "message": "Negotiation ended without trade offer",
             }
     
+    def _run_chat_agent_in_thread(
+        self, 
+        player: "BaseLLMPlayer", 
+        prompt: str, 
+        deps: "CatanDependencies",
+        toolsets: list
+    ) -> Any:
+        """
+        Run the chat agent in a separate thread to avoid event loop conflicts.
+        
+        This is necessary because negotiation is triggered from within a tool call
+        in the main agent's run_sync(), which already has an event loop. Calling
+        another run_sync() would cause an asyncio conflict.
+        """
+        def run_in_new_loop():
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return player.chat_agent.run_sync(
+                    prompt,
+                    deps=deps,
+                    toolsets=toolsets,
+                    usage_limits=UsageLimits(tool_calls_limit=5),
+                )
+            finally:
+                loop.close()
+        
+        # Run in a separate thread
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(run_in_new_loop)
+            return future.result(timeout=60)  # 60 second timeout per chat turn
+    
     def _run_negotiation_loop(self, game: Game) -> Optional[Action]:
         """
-        Run the main negotiation loop.
+        Run the main negotiation loop using chat agents.
         
-        Each participant speaks in turn (round-robin from initiator).
+        Each participant's chat_agent speaks in turn (round-robin from initiator).
         The loop ends when:
-        - Initiator makes a trade offer
+        - Initiator makes a trade offer (via trade_offer tool)
         - Max rounds reached
         - All non-initiator participants leave
         
@@ -325,8 +360,8 @@ class NegotiationManager:
             OFFER_TRADE action if initiator made one, else None
         """
         from catanatron.players.llm.toolsets import (
-            NEGOTIATION_INITIATOR_TOOLSET,
-            NEGOTIATION_PARTICIPANT_TOOLSET,
+            CHAT_INITIATOR_TOOLSET,
+            CHAT_PARTICIPANT_TOOLSET,
         )
         from catanatron.players.llm.base import CatanDependencies
         
@@ -361,26 +396,29 @@ class NegotiationManager:
             
             # Select toolset based on whether this is the initiator
             if session.is_initiator_turn:
-                toolsets = [NEGOTIATION_INITIATOR_TOOLSET]
+                toolsets = [CHAT_INITIATOR_TOOLSET]
             else:
-                toolsets = [NEGOTIATION_PARTICIPANT_TOOLSET]
+                toolsets = [CHAT_PARTICIPANT_TOOLSET]
             
-            # Run the player's agent
+            # Run the player's CHAT agent in a separate thread
+            # to avoid event loop conflicts (we're called from inside a tool)
             try:
-                result = player.agent.run_sync(
-                    prompt,
-                    deps=deps,
-                    toolsets=toolsets,
-                    usage_limits=UsageLimits(tool_calls_limit=5),
+                result = self._run_chat_agent_in_thread(
+                    player, prompt, deps, toolsets
                 )
                 
-                # Check if a trade action was set
+                # Check if a trade action was set (initiator used trade_offer tool)
                 if player._pending_trade_action is not None:
                     trade_action = player._pending_trade_action
                     player._pending_trade_action = None
                     session.is_active = False
                     return trade_action
                 
+            except concurrent.futures.TimeoutError:
+                logfire.warning(
+                    f"Chat agent timed out for {current_color}",
+                    color=current_color.value
+                )
             except Exception as e:
                 # Log error but continue negotiation
                 logfire.error(
