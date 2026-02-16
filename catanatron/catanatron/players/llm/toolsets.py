@@ -194,26 +194,15 @@ def _initiate_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
             "suggestion": "Make a trade offer directly using the trade_offer tool.",
         }
     
-    # Start the negotiation - this will run the negotiation loop
-    # and return when the initiator makes a trade offer or negotiation ends
-    result = manager.start_negotiation(ctx.deps.color, ctx.deps.game)
+    # Set flag - decide() will handle this AFTER run_sync() completes
+    # This avoids nested run_sync() calls which cause event loop binding errors
+    player._pending_negotiation_request = True
     
-    if result.get("trade_action"):
-        # Negotiation ended with a trade offer
-        ctx.deps._pending_trade_action = result["trade_action"]
-        return {
-            "success": True,
-            "negotiation_completed": True,
-            "trade_offer_made": True,
-            "message": "Negotiation completed. Your trade offer will be submitted.",
-        }
-    else:
-        return {
-            "success": True,
-            "negotiation_completed": True,
-            "trade_offer_made": False,
-            "message": "Negotiation ended without a trade offer. You can continue your turn.",
-        }
+    return {
+        "success": True,
+        "negotiation_will_start": True,
+        "message": "Negotiation will start now. Control will return to you after negotiation completes.",
+    }
 
 
 def _send_message(ctx: RunContext[CatanDependencies], message: str) -> Dict[str, Any]:

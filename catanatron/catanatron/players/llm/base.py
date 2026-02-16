@@ -106,6 +106,7 @@ class BaseLLMPlayer(Player):
     negotiation_manager: Optional["NegotiationManager"]
     negotiation_history: List["NegotiationMessage"]
     _pending_trade_action: Optional[Action]
+    _pending_negotiation_request: bool
     _last_negotiation_turn: int
 
     def __init__(
@@ -164,6 +165,7 @@ class BaseLLMPlayer(Player):
         self.negotiation_manager: Optional["NegotiationManager"] = None
         self.negotiation_history: List["NegotiationMessage"] = []
         self._pending_trade_action: Optional[Action] = None
+        self._pending_negotiation_request: bool = False
         self._last_negotiation_turn: int = -1
 
         # Create the agent - defer to allow subclasses to customize
@@ -488,8 +490,9 @@ class BaseLLMPlayer(Player):
             # Clear negotiation history on new turn
             self.clear_negotiation_history()
 
-        # 3. Clear any pending trade action from previous runs
+        # 3. Clear any pending trade action and negotiation request from previous runs
         self._pending_trade_action = None
+        self._pending_negotiation_request = False
 
         # 4. Build dependencies with negotiation support
         deps = CatanDependencies(
@@ -527,7 +530,56 @@ class BaseLLMPlayer(Player):
             # 7. Update history
             self.history_manager.update(result.all_messages())
 
-            # 8. Check if a trade action was set by a tool
+            # 8. Check if negotiation was requested (BEFORE checking trade action)
+            # This runs AFTER run_sync() completes, avoiding nested event loops
+            if self._pending_negotiation_request and self.negotiation_manager is not None:
+                self._pending_negotiation_request = False
+                
+                # Run negotiation loop OUTSIDE of run_sync() - no nested calls!
+                neg_result = self.negotiation_manager.start_negotiation(self.color, game)
+                trade_action = neg_result.get("trade_action")
+                
+                if trade_action is not None:
+                    logfire.info(
+                        f"LLM player {self.color} made trade offer after negotiation",
+                        turn_number=current_turn,
+                        action_type=trade_action.action_type.value
+                    )
+                    return trade_action
+                
+                # Negotiation ended without trade - re-run agent to continue turn
+                # (with updated negotiation history in context)
+                result = self.agent.run_sync(
+                    self._build_prompt(game),
+                    deps=deps,
+                    message_history=self.history_manager.get_messages(),
+                    toolsets=self._select_toolsets(game),
+                    usage_limits=UsageLimits(
+                        tool_calls_limit=self.tool_calls_limit,
+                    ),
+                    model_settings=model_settings,
+                )
+                self.history_manager.update(result.all_messages())
+                
+                # Check for trade action (in case they made one after negotiation)
+                if self._pending_trade_action is not None:
+                    action = self._pending_trade_action
+                    self._pending_trade_action = None
+                    logfire.info(
+                        f"LLM player {self.color} made trade offer after negotiation",
+                        turn_number=current_turn,
+                        action_type=action.action_type.value
+                    )
+                    return action
+                
+                action = self._resolve_action(result.output, playable_actions)
+                logfire.info(
+                    f"LLM player {self.color} chose action {action.action_type} after negotiation",
+                    turn_number=current_turn
+                )
+                return action
+
+            # 9. Check if a trade action was set by a tool
             if self._pending_trade_action is not None:
                 action = self._pending_trade_action
                 self._pending_trade_action = None
@@ -538,7 +590,7 @@ class BaseLLMPlayer(Player):
                 )
                 return action
 
-            # 9. Map output to Action
+            # 10. Map output to Action
             action = self._resolve_action(result.output, playable_actions)
             logfire.info(f"LLM player {self.color} chose action {action.action_type}", turn_number=current_turn)
             return action
@@ -565,6 +617,7 @@ class BaseLLMPlayer(Player):
         self.history_manager.clear()
         self.clear_negotiation_history()
         self._pending_trade_action = None
+        self._pending_negotiation_request = False
         self._last_negotiation_turn = -1
 
     def __getstate__(self):
@@ -604,4 +657,5 @@ class BaseLLMPlayer(Player):
         self.negotiation_manager = None
         self.negotiation_history = []
         self._pending_trade_action = None
+        self._pending_negotiation_request = False
         self._last_negotiation_turn = -1
