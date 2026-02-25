@@ -75,9 +75,11 @@ CATAN_SYSTEM_PROMPT = """You are an expert Settlers of Catan player. Your goal i
 
 ## Decision Making
 Every turn use the `get_game_and_action_analysis` tool IMMEDIATELY before doing any thinking or reasoning. Do this exactly once per turn to get a comprehensive analysis of the game state and available actions.
-Use the available tools to analyze the game state before making decisions. `initiate_negotiation` tool is available only when legal and must be used before using `trade_offer` tool.
+Use the available tools to analyze the game state before making decisions.
+When `initiate_negotiation` is available, prefer domestic trade over maritime trade. Calling `initiate_negotiation` opens a chat with other players; after the conversation you will specify your trade offer.
+You can only negotiate once per turn; once the negotiation concludes no further trading is allowed that turn.
 Consider both immediate gains and long-term strategy.
-Pay attention to the negotiation history and performance of the other players. Consider using domestic trade offers in place of maritime trade offers when possible.
+Pay attention to the negotiation history and performance of the other players.
 If a strategy advisor recommendation is provided, take it into consideration but make the final decision based on your analysis.
 
 Always return a valid action from the available options."""
@@ -192,10 +194,11 @@ class BaseLLMPlayer(Player):
         """
         # Use index-based output for simplicity and reliability
         agent = Agent(
-            self._model,  # Can be string or Model instance
+            self._model,
             deps_type=CatanDependencies,
             output_type=ActionByIndex,
             system_prompt=CATAN_SYSTEM_PROMPT,
+            retries=3,
         )
 
         return agent
@@ -267,9 +270,9 @@ class BaseLLMPlayer(Player):
     
     def _can_trade(self, game: Game) -> bool:
         """
-        Check if trade tools should be available.
+        Check if the initiate_negotiation tool should be available.
         
-        Trade tools are available when:
+        Negotiation (the only path to domestic trade) is available when:
         - Current prompt is PLAY_TURN
         - Player has rolled the dice
         - It's this player's turn
@@ -279,7 +282,7 @@ class BaseLLMPlayer(Player):
             game: Current game instance
             
         Returns:
-            True if trade tools should be available
+            True if negotiation initiation should be available
         """
         state = game.state
         
@@ -433,12 +436,16 @@ class BaseLLMPlayer(Player):
 
         return "\n".join(prompt_parts)
 
-    def _is_roll_or_end_turn(self, playable_actions: List[Action]) -> bool:
-        """Check if the only possible action is either roll or end turn."""
-        return len(playable_actions) == 1 and (
-            playable_actions[0].action_type == ActionType.ROLL or
-            playable_actions[0].action_type == ActionType.END_TURN or
-            playable_actions[0].action_type == ActionType.DISCARD
+    def _is_auto_play_action(self, playable_actions: List[Action]) -> bool:
+        """Check if there's only one forced action that doesn't need LLM reasoning."""
+        if len(playable_actions) != 1:
+            return False
+        action_type = playable_actions[0].action_type
+        return action_type in (
+            ActionType.ROLL,
+            ActionType.END_TURN,
+            ActionType.DISCARD,
+            ActionType.REJECT_TRADE,
         )
 
     def _resolve_action(
@@ -471,10 +478,33 @@ class BaseLLMPlayer(Player):
 
         This is the main entry point called by the game engine.
         """
-        # 0. Checkif the only possible action is either roll or end turn, return it immediately
-        if self._is_roll_or_end_turn(playable_actions):
+        state = game.state
+        current_turn = state.num_turns
+
+        # 0a. Workaround for game engine bug: auto-reject if asked to decide
+        # on our own trade offer (engine may route DECIDE_TRADE to the offerer
+        # when the offerer isn't at seat index 0).
+        if state.current_prompt == ActionPrompt.DECIDE_TRADE:
+            offerer_index = state.current_trade[10]
+            if state.color_to_index.get(self.color) == offerer_index:
+                action = Action(self.color, ActionType.REJECT_TRADE, state.current_trade)
+                logfire.info(
+                    f"LLM player {self.color} auto-rejected own trade offer",
+                    turn_number=current_turn,
+                )
+                return action
+
+        # 0b. Auto-play forced single actions (ROLL, END_TURN, DISCARD, sole REJECT_TRADE)
+        if self._is_auto_play_action(playable_actions):
             action = playable_actions[0]
-            logfire.info(f"LLM player {self.color} chose action {action.action_type}", turn_number=game.state.num_turns)
+            log_kwargs: dict = {"turn_number": current_turn}
+            if action.action_type == ActionType.REJECT_TRADE:
+                log_kwargs["trade_offer_from"] = state.colors[state.current_trade[10]].value
+                log_kwargs["decision"] = "REJECT_TRADE"
+            logfire.info(
+                f"LLM player {self.color} chose action {action.action_type}",
+                **log_kwargs,
+            )
             return action
 
         # 1. Get strategy recommendation from parent (if any)
@@ -483,18 +513,16 @@ class BaseLLMPlayer(Player):
         )
 
         # 2. Check for turn boundary, manage history
-        current_turn = game.state.num_turns
         if self.history_manager.is_new_turn(current_turn):
             self.history_manager.clear()
             self.history_manager.set_turn(current_turn)
-            # Clear negotiation history on new turn
             self.clear_negotiation_history()
 
-        # 3. Clear any pending trade action and negotiation request from previous runs
+        # 3. Clear pending flags from previous runs
         self._pending_trade_action = None
         self._pending_negotiation_request = False
 
-        # 4. Build dependencies with negotiation support
+        # 4. Build dependencies
         deps = CatanDependencies(
             color=self.color,
             game=game,
@@ -502,8 +530,7 @@ class BaseLLMPlayer(Player):
             strategy_recommendation=recommendation,
             strategy_reasoning=reasoning,
             turn_number=current_turn,
-            is_my_turn=game.state.current_turn_index
-            == game.state.color_to_index[self.color],
+            is_my_turn=state.current_turn_index == state.color_to_index[self.color],
             negotiation_manager=self.negotiation_manager,
             player_instance=self,
         )
@@ -511,11 +538,10 @@ class BaseLLMPlayer(Player):
         # 5. Select appropriate toolsets based on game state
         toolsets = self._select_toolsets(game)
 
-        # 6. Run agent with history, toolsets, and model settings
+        # 6. Run agent
         try:
-            # Get model settings (temperature, max_tokens, timeout, etc.)
             model_settings = self._get_model_settings()
-            
+
             result = self.agent.run_sync(
                 self._build_prompt(game),
                 deps=deps,
@@ -530,25 +556,23 @@ class BaseLLMPlayer(Player):
             # 7. Update history
             self.history_manager.update(result.all_messages())
 
-            # 8. Check if negotiation was requested (BEFORE checking trade action)
-            # This runs AFTER run_sync() completes, avoiding nested event loops
+            # 8. Handle negotiation request (runs AFTER run_sync to avoid nesting)
             if self._pending_negotiation_request and self.negotiation_manager is not None:
                 self._pending_negotiation_request = False
-                
-                # Run negotiation loop OUTSIDE of run_sync() - no nested calls!
+
                 neg_result = self.negotiation_manager.start_negotiation(self.color, game)
                 trade_action = neg_result.get("trade_action")
-                
+
                 if trade_action is not None:
                     logfire.info(
-                        f"LLM player {self.color} made trade offer after negotiation",
+                        f"LLM player {self.color} made trade offer",
                         turn_number=current_turn,
-                        action_type=trade_action.action_type.value
+                        action_type=trade_action.action_type.value,
                     )
                     return trade_action
-                
-                # Negotiation ended without trade - re-run agent to continue turn
-                # (with updated negotiation history in context)
+
+                # Negotiation ended without trade -- re-run agent to continue turn
+                # (trade tools are now disabled since initiated_this_turn is set)
                 result = self.agent.run_sync(
                     self._build_prompt(game),
                     deps=deps,
@@ -560,52 +584,39 @@ class BaseLLMPlayer(Player):
                     model_settings=model_settings,
                 )
                 self.history_manager.update(result.all_messages())
-                
-                # Check for trade action (in case they made one after negotiation)
-                if self._pending_trade_action is not None:
-                    action = self._pending_trade_action
-                    self._pending_trade_action = None
-                    logfire.info(
-                        f"LLM player {self.color} made trade offer after negotiation",
-                        turn_number=current_turn,
-                        action_type=action.action_type.value
-                    )
-                    return action
-                
+
                 action = self._resolve_action(result.output, playable_actions)
                 logfire.info(
                     f"LLM player {self.color} chose action {action.action_type} after negotiation",
-                    turn_number=current_turn
-                )
-                return action
-
-            # 9. Check if a trade action was set by a tool
-            if self._pending_trade_action is not None:
-                action = self._pending_trade_action
-                self._pending_trade_action = None
-                logfire.info(
-                    f"LLM player {self.color} made trade offer",
                     turn_number=current_turn,
-                    action_type=action.action_type.value
                 )
                 return action
 
-            # 10. Map output to Action
+            # 9. Map output to Action (trade offers only come through negotiation now)
             action = self._resolve_action(result.output, playable_actions)
-            logfire.info(f"LLM player {self.color} chose action {action.action_type}", turn_number=current_turn)
+
+            log_kwargs = {"turn_number": current_turn}
+            if state.current_prompt == ActionPrompt.DECIDE_TRADE:
+                log_kwargs["trade_offer_from"] = state.colors[state.current_trade[10]].value
+                log_kwargs["decision"] = action.action_type.value
+            logfire.info(
+                f"LLM player {self.color} chose action {action.action_type}",
+                **log_kwargs,
+            )
             return action
 
         except TimeoutError as e:
-            # Timeout occurred - fall back to strategy recommendation
             logfire.warning(
                 f"LLM player {self.color} timed out after {self.timeout}s",
                 turn_number=current_turn,
-                error=str(e)
+                error=str(e),
             )
         except Exception as e:
-            # On any other error (including UsageLimitExceeded), fall back to strategy recommendation or first action
-            logfire.error(f"LLM player {self.color} error: {e}", turn_number=current_turn)
-        
+            logfire.error(
+                f"LLM player {self.color} error: {e}",
+                turn_number=current_turn,
+            )
+
         # Fallback for exception cases
         if recommendation is not None:
             return recommendation
