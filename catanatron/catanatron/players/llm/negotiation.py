@@ -439,7 +439,7 @@ class NegotiationManager:
             lines.append("1. Send a message to discuss the trade")
             lines.append("2. Make a formal trade offer (this ends the negotiation)")
             lines.append("")
-            lines.append("Use get_game_and_action_analysis to review your resources,")
+            lines.append("Use get_game_and_action_analysis if you need to review your resources,")
             lines.append("then send_message to propose trades or trade_offer to make a formal offer.")
         else:
             lines.append("=== YOUR TURN ===")
@@ -447,7 +447,7 @@ class NegotiationManager:
             lines.append("1. Send a message to respond or make counter-proposals")
             lines.append("2. Leave the negotiation if you're not interested")
             lines.append("")
-            lines.append("Use get_game_and_action_analysis to review your resources,")
+            lines.append("Use get_game_and_action_analysis if you need to review your resources,")
             lines.append("then send_message to respond or leave_negotiation to exit.")
         
         return "\n".join(lines)

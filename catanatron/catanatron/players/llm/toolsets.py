@@ -432,31 +432,31 @@ def _analyze_robber(game, my_color) -> Dict[str, Any]:
 
 def create_analysis_toolset() -> FunctionToolset:
     """Create toolset with game analysis tools."""
-    toolset = FunctionToolset()
-    
-    @toolset.tool
-    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
-        """
-        Get comprehensive game state, available actions, and strategy recommendation.
+    toolset = FunctionToolset() 
+    #NOTE: Disabled for prompt injection testing (agent uses too liberaly)
+    # @toolset.tool
+    # def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+    #     """
+    #     Get comprehensive game state, available actions, and strategy recommendation.
         
-        Use this tool FIRST on every turn to understand the current game situation
-        before making any decisions.
-        """
-        return _get_game_and_action_analysis(ctx)
+    #     Use this tool FIRST on every turn to understand the current game situation
+    #     before making any decisions.
+    #     """
+    #     return _get_game_and_action_analysis(ctx)
     
-    @toolset.tool
-    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
-        """
-        Analyze the board for strategic insights.
+    # @toolset.tool
+    # def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+    #     """
+    #     Analyze the board for strategic insights.
 
-        Args:
-            focus: What to analyze. Options:
-                - 'expansion': Where can I build next, best spots
-                - 'blocking': How to block opponents' expansion
-                - 'ports': Port accessibility and trading options
-                - 'robber': Optimal robber placements
-        """
-        return _analyze_board(ctx, focus)
+    #     Args:
+    #         focus: What to analyze. Options:
+    #             - 'expansion': Where can I build next, best spots
+    #             - 'blocking': How to block opponents' expansion
+    #             - 'ports': Port accessibility and trading options
+    #             - 'robber': Optimal robber placements
+    #     """
+    #     return _analyze_board(ctx, focus)
     
     return toolset
 
@@ -548,24 +548,25 @@ def create_normal_play_toolset() -> FunctionToolset:
     """Create toolset for normal gameplay (analysis only)."""
     toolset = FunctionToolset()
     
-    @toolset.tool
-    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
-        """
-        Get comprehensive game state, available actions, and strategy recommendation.
-        
-        Use this tool FIRST on every turn to understand the current game situation.
-        """
-        return _get_game_and_action_analysis(ctx)
-    
-    @toolset.tool
-    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
-        """
-        Analyze the board for strategic insights.
-
-        Args:
-            focus: 'expansion', 'blocking', 'ports', or 'robber'
-        """
-        return _analyze_board(ctx, focus)
+    # NOTE: Disabled — game state is now inlined in the user prompt.
+    # @toolset.tool
+    # def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+    #     """
+    #     Get comprehensive game state, available actions, and strategy recommendation.
+    #     
+    #     Use this tool FIRST on every turn to understand the current game situation.
+    #     """
+    #     return _get_game_and_action_analysis(ctx)
+    # 
+    # @toolset.tool
+    # def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+    #     """
+    #     Analyze the board for strategic insights.
+    #
+    #     Args:
+    #         focus: 'expansion', 'blocking', 'ports', or 'robber'
+    #     """
+    #     return _analyze_board(ctx, focus)
     
     return toolset
 
@@ -574,24 +575,25 @@ def create_normal_play_with_trade_toolset() -> FunctionToolset:
     """Create toolset for normal gameplay with trade tools (after rolling)."""
     toolset = FunctionToolset()
     
-    @toolset.tool
-    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
-        """
-        Get comprehensive game state, available actions, and strategy recommendation.
-        
-        Use this tool FIRST on every turn to understand the current game situation.
-        """
-        return _get_game_and_action_analysis(ctx)
-    
-    @toolset.tool
-    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
-        """
-        Analyze the board for strategic insights.
-
-        Args:
-            focus: 'expansion', 'blocking', 'ports', or 'robber'
-        """
-        return _analyze_board(ctx, focus)
+    # NOTE: Disabled — game state is now inlined in the user prompt.
+    # @toolset.tool
+    # def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+    #     """
+    #     Get comprehensive game state, available actions, and strategy recommendation.
+    #     
+    #     Use this tool FIRST on every turn to understand the current game situation.
+    #     """
+    #     return _get_game_and_action_analysis(ctx)
+    # 
+    # @toolset.tool
+    # def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+    #     """
+    #     Analyze the board for strategic insights.
+    #
+    #     Args:
+    #         focus: 'expansion', 'blocking', 'ports', or 'robber'
+    #     """
+    #     return _analyze_board(ctx, focus)
     
     @toolset.tool
     def trade_offer(
@@ -634,22 +636,23 @@ def create_negotiation_participant_toolset() -> FunctionToolset:
     """Create toolset for participants in a negotiation."""
     toolset = FunctionToolset()
     
-    @toolset.tool
-    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
-        """
-        Get comprehensive game state, available actions, and strategy recommendation.
-        """
-        return _get_game_and_action_analysis(ctx)
-    
-    @toolset.tool
-    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
-        """
-        Analyze the board for strategic insights.
-
-        Args:
-            focus: 'expansion', 'blocking', 'ports', or 'robber'
-        """
-        return _analyze_board(ctx, focus)
+    # NOTE: Disabled — game state is now inlined in the user prompt.
+    # @toolset.tool
+    # def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+    #     """
+    #     Get comprehensive game state, available actions, and strategy recommendation.
+    #     """
+    #     return _get_game_and_action_analysis(ctx)
+    # 
+    # @toolset.tool
+    # def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+    #     """
+    #     Analyze the board for strategic insights.
+    #
+    #     Args:
+    #         focus: 'expansion', 'blocking', 'ports', or 'robber'
+    #     """
+    #     return _analyze_board(ctx, focus)
     
     @toolset.tool
     def send_message(ctx: RunContext[CatanDependencies], message: str) -> Dict[str, Any]:
@@ -675,22 +678,23 @@ def create_negotiation_initiator_toolset() -> FunctionToolset:
     """Create toolset for the player who initiated the negotiation."""
     toolset = FunctionToolset()
     
-    @toolset.tool
-    def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
-        """
-        Get comprehensive game state, available actions, and strategy recommendation.
-        """
-        return _get_game_and_action_analysis(ctx)
-    
-    @toolset.tool
-    def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
-        """
-        Analyze the board for strategic insights.
-
-        Args:
-            focus: 'expansion', 'blocking', 'ports', or 'robber'
-        """
-        return _analyze_board(ctx, focus)
+    # NOTE: Disabled — game state is now inlined in the user prompt.
+    # @toolset.tool
+    # def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+    #     """
+    #     Get comprehensive game state, available actions, and strategy recommendation.
+    #     """
+    #     return _get_game_and_action_analysis(ctx)
+    # 
+    # @toolset.tool
+    # def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
+    #     """
+    #     Analyze the board for strategic insights.
+    #
+    #     Args:
+    #         focus: 'expansion', 'blocking', 'ports', or 'robber'
+    #     """
+    #     return _analyze_board(ctx, focus)
     
     @toolset.tool
     def send_message(ctx: RunContext[CatanDependencies], message: str) -> Dict[str, Any]:

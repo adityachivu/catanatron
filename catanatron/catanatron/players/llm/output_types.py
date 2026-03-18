@@ -20,7 +20,10 @@ class ActionByIndex(BaseModel):
         description="Index into the playable_actions list (0-based)"
     )
     reasoning: Optional[str] = Field(
-        default=None, description="Brief explanation of why this action was chosen"
+        default=None, description="Step-by-step analysis of the decision"
+    )
+    confidence: Optional[float] = Field(
+        default=None, description="Confidence in the chosen action, between 0 and 1"
     )
 
 
