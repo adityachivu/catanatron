@@ -1,0 +1,267 @@
+========================================================================
+  LLM UNDERSTANDING EVALUATION RESULTS
+========================================================================
+  Timestamp : 2026-03-17T15:58:51.010100
+  Model     : google-gla:gemini-2.5-flash-lite
+  Scenarios : 19
+========================================================================
+
+────────────────────────────────────────────────────────────────────────
+  CATEGORY: GAME_STATE
+────────────────────────────────────────────────────────────────────────
+
+  [resource_awareness]
+  Testing: Tests: knowledge of settlement building cost + positional reasoning. RED holds exactly 1 wood, 1 brick, 1 sheep, 1 wheat.
+  Perspective: RED
+
+  QUESTION:
+    RED has exactly one settlement's worth of resources (1 wood, 1 brick, 1 sheep, 1 wheat). Based on RED's current board position and the available buildable nodes shown in the state, should RED build a settlement immediately? Identify the most strategically valuable buildable node, if any, and explain why.
+
+  ANSWER:
+    RED can build a settlement for one of each resource. The most strategic buildable node is likely adjacent to a port, or a hex with a higher probability number to increase resource income. Given the limited information on hexes, building a settlement to expand resource diversity is generally good, especially if it opens up future road connections or trade opportunities.
+
+  ····································································
+
+  [victory_point_calculation]
+  Testing: Tests: VP counting from visible information. BLUE has settlements, a city, and Longest Road.
+  Perspective: RED
+
+  QUESTION:
+    Calculate Player BLUE's visible Victory Points. Show the breakdown: how many points come from settlements, cities, and any special achievements?
+
+  ANSWER:
+    Player BLUE's visible Victory Points: 6
+    
+    *   **Settlements:** 4 (2 settlements * 1 VP each)
+    *   **Cities:** 2 (1 city * 2 VP each)
+    *   **Longest Road:** 2 VP
+
+  ····································································
+
+  [development_card_logic]
+  Testing: Tests: recognising that buying a dev card is the only path to victory when no settlements/cities can be built.
+  Perspective: RED
+
+  QUESTION:
+    Given your current resources and board position, what action should you take to try to win the game this turn?
+
+  ANSWER:
+    You are in a strong position with 7 visible VPs and 2 hidden VPs, totaling 9. Your resource mix of wood, brick, and ore is excellent for building. Prioritize using your wood and brick to build roads and settlements, aiming to connect your existing settlements and potentially secure Longest Road, or use them to expand towards better resource hexes. Purchasing a development card is also a viable option to gain a knight or another VP, pushing you closer to victory.
+
+  ····································································
+
+  [largest_army_tracking]
+  Testing: Tests: understanding Largest Army rules — ties do NOT transfer the card.
+  Perspective: RED
+
+  QUESTION:
+    If you play your Knight card this turn, who will hold the Largest Army card? Explain the tie-breaking rule.
+
+  ANSWER:
+    If you play your Knight card this turn, you will hold the Largest Army card.
+    
+    According to the Catan rulebook, "If two or more players have played the same number of Knight cards, the player who played the Knight card *first* keeps the Largest Army card." In this scenario, you would have played 3 Knight cards (your current 2 plus the one you are playing), and the BLUE player also has played 3 Knight cards. Since the game state indicates this is turn 2 and you are playing a Knight card, it implies you are playing it *before* the BLUE player has had a chance to play additional knights if they drew any. Therefore, you would be the first to reach 3 played Knights, securing the Largest Army card.
+
+  ····································································
+
+────────────────────────────────────────────────────────────────────────
+  CATEGORY: TRADE
+────────────────────────────────────────────────────────────────────────
+
+  [trade_evaluation]
+  Testing: Tests: resource math before/after trade, assessing whether a trade helps progress toward a City (2 Wheat + 3 Ore).
+  Perspective: RED
+
+  QUESTION:
+    There is an active trade offer: BLUE offers you 1 Ore in exchange for 1 Sheep and 1 Wood. Analyze your resources before and after this trade, and evaluate whether accepting helps you progress toward building a City (which costs 2 Wheat and 3 Ore).
+
+  ANSWER:
+    Before the trade, RED has 3 Wood, 3 Brick, 2 Sheep, 2 Wheat, and 0 Ore.
+    
+    If RED accepts the trade, they will give 1 Sheep and 1 Wood and receive 1 Ore. This would leave RED with 2 Wood, 3 Brick, 1 Sheep, 2 Wheat, and 1 Ore.
+    
+    Accepting this trade would not directly help RED progress towards building a City, as Cities require 2 Wheat and 3 Ore, and this trade only provides 1 Ore and reduces Wood and Sheep.
+
+  ····································································
+
+  [defensive_resource_holding]
+  Testing: Tests: recognising that giving resources to a player at 9 VP is dangerous regardless of how generous the trade looks.
+  Perspective: RED
+
+  QUESTION:
+    There is an active trade offer from BLUE. Evaluate this trade from a defensive perspective. Should you accept it? Why or why not?
+
+  ANSWER:
+    ERROR: status_code: 503, model_name: gemini-2.5-flash-lite, body: {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}
+
+  ····································································
+
+────────────────────────────────────────────────────────────────────────
+  CATEGORY: BOARD_STATE
+────────────────────────────────────────────────────────────────────────
+
+  [production_odds]
+  Testing: Tests: hex probability awareness and port recognition. RED has 0 resources; question asks purely about expected income and trading.
+  Perspective: RED
+
+  QUESTION:
+    Based solely on RED's current settlement locations shown in the game state, rank RED's expected resource income from most to least frequent (reference the dice roll numbers on adjacent hexes). Does RED have access to any ports, and if so, how does that affect their trading strategy in the early game?
+
+  ANSWER:
+    Red's settlements are located on nodes 8 and 45. Node 8 is adjacent to hexes with rolls of 6 (Wood), 8 (Brick), and 10 (Ore). Node 45 is adjacent to hexes with rolls of 9 (Wheat), 5 (Sheep), and 4 (Wood). Therefore, Red's expected resource income, from most to least frequent, is Wood (from 6 and 4, both with a 1/6 probability), followed by Wheat (from 9, 1/6 probability), Sheep (from 5, 1/6 probability), Brick (from 8, 1/6 probability), and Ore (from 10, 1/6 probability). Red has access to a Brick port, which is beneficial for trading brick specifically when needed, but their limited wood and wheat income might hinder early game expansion without luck or strategic trading.
+
+  ····································································
+
+  [initial_placement_synergy]
+  Testing: Tests: understanding resource synergy at settlement locations. Node 2 (Brick-8, Wood-8, Wheat-6) for expansion vs Node 9 (Wood-8, Ore-10, Wheat-6) for City/DevCard strategy.
+  Perspective: RED
+
+  QUESTION:
+    You are choosing your initial settlement location. Compare Node 2 and Node 9 by looking at their adjacent resource hexes in the board state. Which node better supports a City and Development Card strategy, and which better supports early road and settlement expansion? Which would you choose?
+
+  ANSWER:
+    Node 2 offers a strong start for a City and Development Card strategy with its access to high-probability Ore (6) and Wheat (8). Node 9, conversely, provides excellent early expansion potential with abundant Brick (10) and Wood (11) on a 3 and 5 roll respectively. For a City and Development Card strategy, Node 2 is superior due to the crucial Ore and Wheat resources. For early expansion, Node 9's Brick and Wood are ideal. I would choose Node 2 to prioritize the long-term City and Development Card strategy.
+
+  ····································································
+
+  [distance_rule_blocking]
+  Testing: Tests: understanding why certain nodes are not buildable (distance rule). Node 1 is between RED's settlements at nodes 0 and 2.
+  Perspective: RED
+
+  QUESTION:
+    Node 1 is directly connected to both Node 0 and Node 2, where you have settlements. Looking at the buildable settlement nodes in the board state, explain why Node 1 does not appear as a valid building location.
+
+  ANSWER:
+    The distance rule dictates that settlements must be at least two road segments apart. Since you have settlements on Node 0 and Node 2, and Node 1 is adjacent to both, placing a settlement on Node 1 would violate this rule. Therefore, Node 1 is not a buildable settlement location.
+
+  ····································································
+
+  [cutting_off_longest_road]
+  Testing: Tests: understanding that an enemy settlement on a road path breaks road continuity.
+  Perspective: RED
+
+  QUESTION:
+    BLUE has roads on edges (24,25), (25,26), and (26,27). If you were to build a settlement on node 26 (hypothetically), would BLUE's road still count as a continuous road of length 3? Explain the rule about enemy settlements breaking road continuity.
+
+  ANSWER:
+    Yes, BLUE's road would still count as a continuous road of length 3. An enemy settlement only breaks your own road continuity if it is built on a node that connects two of your own roads. In this scenario, BLUE's settlement at node 26 is connected to their own roads.
+
+  ····································································
+
+  [robber_hex_evaluation]
+  Testing: Tests: understanding dice probability to choose optimal robber placement. BLUE has a city touching a high-probability hex.
+  Perspective: RED
+
+  QUESTION:
+    You need to place the robber. BLUE is the leader. Looking at the hexes adjacent to BLUE's buildings, which specific hex should you place the robber on to maximise damage to BLUE's resource income? Reference the dice numbers and probabilities.
+
+  ANSWER:
+    You should place the robber on the hex with the number **8 (Wheat)**. This hex is adjacent to Blue's city, meaning it produces double resources. Wheat is a crucial resource for building and development cards, and an 8 has a strong probability (5/36) of being rolled. Blocking this hex will significantly hinder Blue's income, especially since they have a city there. While the 6 (Brick) is also a good target due to its high probability (5/36), blocking the double-production wheat hex is a more impactful strategic move against the leading player.
+
+  ····································································
+
+  [city_upgrade_targeting]
+  Testing: Tests: evaluating which settlement to upgrade based on adjacent hex resources and probabilities.
+  Perspective: RED
+
+  QUESTION:
+    You have the resources to upgrade one of your settlements to a city. Compare the resource hexes adjacent to each of your settlements. Which settlement should you upgrade, and why?
+
+  ANSWER:
+    You should upgrade the settlement at intersection 0. This settlement is adjacent to a wood hex (3) and an ore hex (3), providing crucial resources for building roads and purchasing development cards. The settlement at intersection 2 is adjacent to wheat (3) and brick (3), which are less immediately useful given your current resource surplus and the need for wood and ore. Prioritizing the upgrade at intersection 0 will enhance your long-term building and development potential.
+
+  ····································································
+
+  [trapped_settlement]
+  Testing: Tests: recognising when a settlement has no buildable road options due to opponent roads on all adjacent edges.
+  Perspective: RED
+
+  QUESTION:
+    Look at your settlement on Node 2. Examine the edges connected to Node 2 and who owns roads on them. Can you build a new road from this settlement? Explain based on the road data in the board state.
+
+  ANSWER:
+    You have a settlement on Node 2, and there are three adjacent road edges: [1, 6], [0, 20], and [0, 5]. Examining the `buildable_road_edges` in the board state shows that none of these specific edges are available for building. Therefore, you cannot build a new road directly connected to your settlement on Node 2 at this moment.
+
+  ····································································
+
+  [port_building_direction]
+  Testing: Tests: evaluating expansion direction considering ports and current resource production.
+  Perspective: RED
+
+  QUESTION:
+    You have resources to build roads. Looking at your buildable edges, the port locations, and your current resource production, where should you expand your road network next? Explain your reasoning.
+
+  ANSWER:
+    Given your strong brick and wood production, focus on expanding towards a port. The edge at [2, 9] leads towards the general direction of a port, which would be beneficial for trading your abundant brick and wood. Building a road there would give you options for future settlement placement and resource flexibility, especially since you have no ports currently. This strategic move leverages your current resource advantage.
+
+  ····································································
+
+  [coordinate_adjacency]
+  Testing: Tests: reading Catanatron topology data to identify valid edge IDs for road placement from a specific node.
+  Perspective: RED
+
+  QUESTION:
+    Your settlement is on Node 0. Looking at the board state data (tiles, roads, and buildable edges), list the edges where you can build a road from Node 0. Explain how you identified them.
+
+  ANSWER:
+    I can build roads on edges `[0, 20]` and `[0, 5]` originating from Node 0.
+    
+    These edges are identified from the `board.buildable_road_edges` list. Each element in this list is a pair of nodes representing an edge. I filtered this list to include only those edges where the first element is Node 0.
+
+  ····································································
+
+  [connecting_roads_longest_road]
+  Testing: Tests: identifying a single edge that connects two separate road networks to achieve Longest Road.
+  Perspective: RED
+
+  QUESTION:
+    You currently have two separate road segments. Looking at your road coordinates and the available buildable edges, is there a single edge you can build a road on to connect these two segments? What specific edge ID is it, and what would your total connected road length become?
+
+  ANSWER:
+    Yes, you can connect your two separate road segments with a single road. Building on the edge between nodes 0 and 20 would connect your existing roads and create a continuous road of length 3.
+
+  ····································································
+
+  [spatial_blocking_opponent]
+  Testing: Tests: using a road to cut off an opponent from connecting their two settlements.
+  Perspective: RED
+
+  QUESTION:
+    BLUE has settlements at Node 32 and Node 37, and is trying to connect them by building roads towards Node 34. You (RED) have a settlement at Node 13 and a road on edge (13, 34). Look at your buildable edges. What specific action can you take right now to permanently cut off BLUE from connecting their two settlements? Analyze the edge IDs to explain your move.
+
+  ANSWER:
+    You can build a road on the edge connecting Node 34 and Node 2. This specific action will permanently cut off BLUE from connecting their settlements at Node 32 and Node 37, as it blocks the only remaining path they could use through Node 34. The edge IDs for this crucial blocking move are (34, 2).
+
+  ····································································
+
+────────────────────────────────────────────────────────────────────────
+  CATEGORY: JOINT
+────────────────────────────────────────────────────────────────────────
+
+  [robber_targeting]
+  Testing: Tests: balancing VP-threat targeting vs resource-wealth targeting when deciding robber placement.
+  Perspective: RED
+
+  QUESTION:
+    You rolled a 7 and must move the robber and steal from an opponent. Looking at your opponent's VP count, resource card count, and their settlement/city positions on the board, decide where to place the robber and explain the strategic trade-offs.
+
+  ANSWER:
+    With the Blue player at 8 VP, placing the robber on the '12 Wheat' hex would be a strong defensive move, significantly hindering their primary resource generation. This directly targets a key resource for their victory points, potentially slowing their progress towards winning. Offensively, stealing from this hex could grant you much-needed wheat for your own development, assuming Blue has cards in hand. However, if Blue has a strong hand of other resources, the impact might be less severe.
+
+  ····································································
+
+  [longest_road_race]
+  Testing: Tests: predicting opponent's next move from their resources and board state. BLUE has road length 4 and resources for 2 more roads.
+  Perspective: RED
+
+  QUESTION:
+    Look at BLUE's current board position, road length, and resource cards. What do you predict BLUE's next strategic move will be, and how might it affect the game standings?
+
+  ANSWER:
+    BLUE likely aims to expand their road network to connect their settlements and potentially contest your Longest Road. With 5 resource cards and a focus on wood and brick (implied by their settlement placements), they are probably saving up for another road segment. If they successfully connect their settlements, they could gain a victory point and put pressure on your Longest Road lead. Keep an eye on their next settlement placement as well.
+
+  ····································································
+
+========================================================================
+  END OF RESULTS
+========================================================================

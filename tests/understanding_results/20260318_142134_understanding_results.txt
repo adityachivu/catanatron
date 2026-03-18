@@ -1,0 +1,39 @@
+========================================================================
+  LLM UNDERSTANDING EVALUATION RESULTS
+========================================================================
+  Timestamp : 2026-03-18T14:21:34.681729
+  Model     : TestModel(call_tools='all', custom_output_text=None, custom_output_args=None, seed=0, last_model_request_parameters=None)
+  Scenarios : 2
+========================================================================
+
+────────────────────────────────────────────────────────────────────────
+  CATEGORY: BOARD_STATE
+────────────────────────────────────────────────────────────────────────
+
+  [connecting_roads_unhinted]
+  Testing: Same setup as connecting_roads_longest_road but with absolutely no hints about connecting segments or Longest Road.
+  Perspective: RED
+
+  QUESTION:
+    Looking at your current road network and available buildable edges, where specifically would you build your next road? Explain your strategic reasoning.
+
+  ANSWER:
+    success (no tool calls)
+
+  ····································································
+
+  [spatial_blocking_unhinted]
+  Testing: Same as spatial_blocking_opponent but with no hints about blocking BLUE.
+  Perspective: RED
+
+  QUESTION:
+    BLUE has settlements at Node 32 and Node 37. You (RED) have a settlement at Node 13 and a road on edge (13, 34). Where should you prioritize building your next road? Explain the strategic value of this placement.
+
+  ANSWER:
+    success (no tool calls)
+
+  ····································································
+
+========================================================================
+  END OF RESULTS
+========================================================================
