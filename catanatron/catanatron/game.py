@@ -5,7 +5,7 @@ Contains Game class which is a thin-wrapper around the State class.
 import uuid
 import random
 import sys
-from typing import Sequence, Union, Optional
+from typing import Sequence, Union, Optional, List
 
 from catanatron.models.actions import generate_playable_actions
 from catanatron.models.enums import Action, ActionPrompt, ActionRecord, ActionType
@@ -137,6 +137,7 @@ class Game:
             accumulator.before(self)
         while self.winning_color() is None and self.state.num_turns < TURNS_LIMIT:
             self.play_tick(decide_fn=decide_fn, accumulators=accumulators)
+
         for accumulator in accumulators:
             accumulator.after(self)
         return self.winning_color()
