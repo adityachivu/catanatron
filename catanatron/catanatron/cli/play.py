@@ -261,28 +261,59 @@ def rich_color(color):
 
 
 def play_batch_core(num_games, players, game_config, accumulators=[]):
+    from contextlib import nullcontext
+
     for accumulator in accumulators:
         if isinstance(accumulator, SimulationAccumulator):
             accumulator.before_all()
 
-    for game_num in range(num_games):
-        for player in players:
-            player.reset_state()
-        catan_map = build_map(game_config.catan_map)
-        game = Game(
-            players,
-            discard_limit=game_config.discard_limit,
+    player_codes = [str(p) for p in players]
+    batch_ctx = (
+        logfire.span(
+            "catanatron.play_batch",
+            num_games=num_games,
+            players=player_codes,
+            map=game_config.catan_map,
             vps_to_win=game_config.vps_to_win,
-            catan_map=catan_map,
         )
-        from catanatron.players.llm.base import BaseLLMPlayer
-        from catanatron.players.llm.negotiation import setup_negotiation
-        manager = setup_negotiation(game, max_rounds=10)
-        for player in players:
-            if isinstance(player, BaseLLMPlayer):
-                manager.register_player(player)
-        game.play(accumulators)
-        yield game
+        if logfire is not None
+        else nullcontext()
+    )
+    with batch_ctx:
+        for game_num in range(num_games):
+            for player in players:
+                player.reset_state()
+            catan_map = build_map(game_config.catan_map)
+            game = Game(
+                players,
+                discard_limit=game_config.discard_limit,
+                vps_to_win=game_config.vps_to_win,
+                catan_map=catan_map,
+            )
+            from catanatron.players.llm.base import BaseLLMPlayer
+            from catanatron.players.llm.negotiation import setup_negotiation
+            manager = setup_negotiation(game, max_rounds=10)
+            for player in players:
+                if isinstance(player, BaseLLMPlayer):
+                    manager.register_player(player)
+
+            game_ctx = (
+                logfire.span(
+                    "catanatron.play_game",
+                    game_number=game_num + 1,
+                    game_id=game.id,
+                    seating=[c.value for c in game.state.colors],
+                )
+                if logfire is not None
+                else nullcontext()
+            )
+            with game_ctx as game_span:
+                game.play(accumulators)
+                if game_span is not None:
+                    winner = game.winning_color()
+                    game_span.set_attribute("winner", winner.value if winner else None)
+                    game_span.set_attribute("num_turns", game.state.num_turns)
+            yield game
 
     for accumulator in accumulators:
         if isinstance(accumulator, SimulationAccumulator):

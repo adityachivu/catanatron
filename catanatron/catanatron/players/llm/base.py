@@ -167,6 +167,10 @@ class BaseLLMPlayer(Player):
         self._pending_negotiation_request: bool = False
         self._last_negotiation_turn: int = -1
 
+        # Logfire player_turn span (persists across decide() calls within a turn)
+        self._turn_span_cm: Any = None
+        self._turn_span_turn: int = -1
+
         # Create the agent - defer to allow subclasses to customize
         self.agent = self._create_agent()
     
@@ -433,7 +437,6 @@ class BaseLLMPlayer(Player):
             ActionType.ROLL,
             ActionType.END_TURN,
             ActionType.DISCARD,
-            ActionType.REJECT_TRADE,
         )
 
     def _resolve_action(
@@ -460,15 +463,63 @@ class BaseLLMPlayer(Player):
         # Would need to match against playable_actions
         return playable_actions[0]
 
+    def _open_turn_span(self, current_turn: int, state) -> None:
+        """Open a player_turn span for this player's game turn."""
+        if logfire is None or self._turn_span_cm is not None:
+            return
+        self._turn_span_cm = logfire.span(
+            f"catanatron.player_turn [{self.color.value}]",
+            player_color=self.color.value,
+            turn_number=current_turn,
+            phase=state.current_prompt.value,
+        )
+        self._turn_span_cm.__enter__()
+        self._turn_span_turn = current_turn
+
+    def _close_turn_span(self) -> None:
+        """Close the current player_turn span if one is open."""
+        if self._turn_span_cm is not None:
+            self._turn_span_cm.__exit__(None, None, None)
+            self._turn_span_cm = None
+            self._turn_span_turn = -1
+
     def decide(self, game: Game, playable_actions: List[Action]) -> Action:
         """
         Make a decision using the LLM agent.
 
         This is the main entry point called by the game engine.
+        The player_turn span opens on the first ROLL of this player's
+        game turn and closes when any code path returns END_TURN.
         """
         state = game.state
         current_turn = state.num_turns
+        is_my_turn = state.current_turn_index == state.color_to_index[self.color]
 
+        # Open span on first decide() of this player's game turn.
+        # Only for real turns (ROLL in playable actions), not initial placement.
+        has_roll = any(a.action_type == ActionType.ROLL for a in playable_actions)
+        if is_my_turn and has_roll and self._turn_span_turn != current_turn:
+            self._close_turn_span()
+            self._open_turn_span(current_turn, state)
+
+        action = self._decide_core(game, playable_actions, state, current_turn, is_my_turn)
+
+        # Close span when the turn ends — single exit point guarantees
+        # no code path can skip this check.
+        if action.action_type == ActionType.END_TURN:
+            self._close_turn_span()
+
+        return action
+
+    def _decide_core(
+        self,
+        game: Game,
+        playable_actions: List[Action],
+        state,
+        current_turn: int,
+        is_my_turn: bool,
+    ) -> Action:
+        """Core decision logic. All code paths return an Action."""
         # 0a. Workaround for game engine bug: auto-reject if asked to decide
         # on our own trade offer (engine may route DECIDE_TRADE to the offerer
         # when the offerer isn't at seat index 0).
@@ -483,17 +534,13 @@ class BaseLLMPlayer(Player):
                     )
                 return action
 
-        # 0b. Auto-play forced single actions (ROLL, END_TURN, DISCARD, sole REJECT_TRADE)
+        # 0b. Auto-play forced single actions (ROLL, END_TURN, DISCARD)
         if self._is_auto_play_action(playable_actions):
             action = playable_actions[0]
-            log_kwargs: dict = {"turn_number": current_turn}
-            if action.action_type == ActionType.REJECT_TRADE:
-                log_kwargs["trade_offer_from"] = state.colors[state.current_trade[10]].value
-                log_kwargs["decision"] = "REJECT_TRADE"
             if logfire is not None:
                 logfire.info(
                     f"LLM player {self.color} chose action {action.action_type}",
-                    **log_kwargs,
+                    turn_number=current_turn,
                 )
             return action
 
@@ -520,7 +567,7 @@ class BaseLLMPlayer(Player):
             strategy_recommendation=recommendation,
             strategy_reasoning=reasoning,
             turn_number=current_turn,
-            is_my_turn=state.current_turn_index == state.color_to_index[self.color],
+            is_my_turn=is_my_turn,
             negotiation_manager=self.negotiation_manager,
             player_instance=self,
         )
@@ -587,7 +634,7 @@ class BaseLLMPlayer(Player):
             # 9. Map output to Action (trade offers only come through negotiation now)
             action = self._resolve_action(result.output, playable_actions)
 
-            log_kwargs = {"turn_number": current_turn}
+            log_kwargs: dict = {"turn_number": current_turn}
             if state.current_prompt == ActionPrompt.DECIDE_TRADE:
                 log_kwargs["trade_offer_from"] = state.colors[state.current_trade[10]].value
                 log_kwargs["decision"] = action.action_type.value
@@ -622,6 +669,7 @@ class BaseLLMPlayer(Player):
         super().reset_state()
         if self.strategy_advisor is not None:
             self.strategy_advisor.reset_state()
+        self._close_turn_span()
         self.history_manager.clear()
         self.clear_negotiation_history()
         self._pending_trade_action = None
@@ -642,6 +690,7 @@ class BaseLLMPlayer(Player):
         state.pop('negotiation_manager', None)
         state.pop('negotiation_history', None)
         state.pop('_pending_trade_action', None)
+        state.pop('_turn_span_cm', None)
         # Model instances (TestModel, FunctionModel) may not be pickleable
         # Store only if it's a string
         if not isinstance(state.get('_model'), str):
@@ -667,3 +716,5 @@ class BaseLLMPlayer(Player):
         self._pending_trade_action = None
         self._pending_negotiation_request = False
         self._last_negotiation_turn = -1
+        self._turn_span_cm = None
+        self._turn_span_turn = -1
