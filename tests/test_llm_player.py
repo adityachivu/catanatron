@@ -309,28 +309,35 @@ class TestPydanticAIPlayerWithMock:
     def test_history_cleared_on_new_turn(self, game_after_initial_placement):
         from catanatron.players.llm_player import PydanticAIPlayer
         from catanatron.players.llm.output_types import ActionByIndex
+        from catanatron.models.enums import ActionType
 
         game = game_after_initial_placement
+
+        # Create multiple playable actions so auto-play doesn't trigger
+        fake_actions = [
+            Action(Color.RED, ActionType.BUILD_ROAD, (0, 3)),
+            Action(Color.RED, ActionType.END_TURN, None),
+        ]
 
         with patch("catanatron.players.llm.base.Agent") as MockAgent:
             mock_agent = MagicMock()
             mock_result = MagicMock()
-            mock_result.data = ActionByIndex(action_index=0)
+            mock_result.output = ActionByIndex(action_index=0)
             mock_result.all_messages.return_value = [{"test": "message"}]
             mock_agent.run_sync.return_value = mock_result
             MockAgent.return_value = mock_agent
 
             player = PydanticAIPlayer(Color.RED)
 
-            # First decide call
-            player.decide(game, game.playable_actions)
+            # First decide call with multiple actions (avoids auto-play)
+            player.decide(game, fake_actions)
             assert player.history_manager.message_count > 0
 
             # Simulate turn change
             game.state.num_turns = 999
 
             # Second decide call should clear history
-            player.decide(game, game.playable_actions)
+            player.decide(game, fake_actions)
             assert player.history_manager.current_turn == 999
 
 
@@ -500,8 +507,8 @@ class TestModelConfig:
         
         settings = config.to_model_settings()
         assert settings is not None
-        assert settings.temperature == 0.5
-        assert settings.timeout == 60.0
+        assert settings["temperature"] == 0.5
+        assert settings["timeout"] == 60.0
 
     def test_create_model_with_string(self):
         """Test create_model with string input."""
@@ -612,8 +619,8 @@ class TestPlayerWithTestModel:
         assert player.max_tokens == 2048
         
         settings = player._get_model_settings()
-        assert settings.temperature == 0.7
-        assert settings.max_tokens == 2048
+        assert settings["temperature"] == 0.7
+        assert settings["max_tokens"] == 2048
 
 
 # ============= Tests with Scripted Responses =============
