@@ -29,7 +29,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Any, TYPE_CHECKING
 import time
 
-import logfire
+try:
+    import logfire
+except ImportError:
+    logfire = None  # type: ignore[assignment]
+from contextlib import nullcontext
 from pydantic_ai import UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 
@@ -287,27 +291,32 @@ class NegotiationManager:
             game=game,
         )
         
-        # Run the negotiation loop with logfire span
-        with logfire.span(
-            "catanatron.negotiation_session",
-            initiator=initiator.value,
-            participants=[c.value for c in participants],
-            turn_number=turn,
-            max_rounds=self.max_rounds,
-        ) as span:
+        # Run the negotiation loop with optional logfire span
+        span_ctx = (
+            logfire.span(
+                "catanatron.negotiation_session",
+                initiator=initiator.value,
+                participants=[c.value for c in participants],
+                turn_number=turn,
+                max_rounds=self.max_rounds,
+            )
+            if logfire is not None
+            else nullcontext()
+        )
+        with span_ctx as span:
             trade_action = self._run_negotiation_loop(game)
-            
-            # Log full negotiation content as structured attributes
-            if self.current_session:
+
+            if span is not None and self.current_session:
                 span.set_attribute("messages_count", len(self.current_session.messages))
                 span.set_attribute("final_round", self.current_session.current_round)
                 span.set_attribute("negotiation_messages", [
                     {"sender": m.sender.value, "content": m.content}
                     for m in self.current_session.messages
                 ])
-            
-            span.set_attribute("resulted_in_trade", trade_action is not None)
-            if trade_action is not None:
+
+            if span is not None:
+                span.set_attribute("resulted_in_trade", trade_action is not None)
+            if trade_action is not None and span is not None:
                 resource_names = ["wood", "brick", "sheep", "wheat", "ore"]
                 offer_values = trade_action.value[:5]
                 ask_values = trade_action.value[5:10]
@@ -407,23 +416,26 @@ class NegotiationManager:
                     )
                     break
                 except UsageLimitExceeded:
-                    logfire.error(
-                        f"Negotiation messaging usage limit for {current_color}",
-                        color=current_color.value,
-                    )
+                    if logfire is not None:
+                        logfire.error(
+                            f"Negotiation messaging usage limit for {current_color}",
+                            color=current_color.value,
+                        )
                     break
                 except Exception as e:
                     if attempt < MAX_NEGOTIATION_RETRIES - 1:
-                        logfire.warning(
-                            f"Negotiation messaging retry {attempt + 1} for {current_color}: {e}",
-                            color=current_color.value,
-                        )
+                        if logfire is not None:
+                            logfire.warning(
+                                f"Negotiation messaging retry {attempt + 1} for {current_color}: {e}",
+                                color=current_color.value,
+                            )
                         time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                     else:
-                        logfire.error(
-                            f"Negotiation messaging error for {current_color} after {MAX_NEGOTIATION_RETRIES} attempts: {e}",
-                            color=current_color.value,
-                        )
+                        if logfire is not None:
+                            logfire.error(
+                                f"Negotiation messaging error for {current_color} after {MAX_NEGOTIATION_RETRIES} attempts: {e}",
+                                color=current_color.value,
+                            )
             
             session.advance_turn()
             
@@ -481,23 +493,26 @@ class NegotiationManager:
                 )
                 break
             except UsageLimitExceeded:
-                logfire.error(
-                    f"Trade finalization usage limit for {initiator}",
-                    color=initiator.value,
-                )
+                if logfire is not None:
+                    logfire.error(
+                        f"Trade finalization usage limit for {initiator}",
+                        color=initiator.value,
+                    )
                 break
             except Exception as e:
                 if attempt < MAX_NEGOTIATION_RETRIES - 1:
-                    logfire.warning(
-                        f"Trade finalization retry {attempt + 1} for {initiator}: {e}",
-                        color=initiator.value,
-                    )
+                    if logfire is not None:
+                        logfire.warning(
+                            f"Trade finalization retry {attempt + 1} for {initiator}: {e}",
+                            color=initiator.value,
+                        )
                     time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
                 else:
-                    logfire.error(
-                        f"Trade finalization error for {initiator} after {MAX_NEGOTIATION_RETRIES} attempts: {e}",
-                        color=initiator.value,
-                    )
+                    if logfire is not None:
+                        logfire.error(
+                            f"Trade finalization error for {initiator} after {MAX_NEGOTIATION_RETRIES} attempts: {e}",
+                            color=initiator.value,
+                        )
         
         if player._pending_trade_action is not None:
             trade_action = player._pending_trade_action

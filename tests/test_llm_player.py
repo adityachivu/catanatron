@@ -334,8 +334,9 @@ class TestLLMAlphaBetaPlayer:
                 Color.RED, model="test:model", depth=3, prunning=True
             )
             assert player.color == Color.RED
-            assert player.depth == 3
-            assert player.prunning == True
+            assert player.strategy_advisor is not None
+            assert player.strategy_advisor.depth == 3
+            assert player.strategy_advisor.prunning == True
 
     def test_repr(self):
         from catanatron.players.llm_player import LLMAlphaBetaPlayer
@@ -362,7 +363,8 @@ class TestLLMMCTSPlayer:
                 Color.RED, model="test:model", num_simulations=20
             )
             assert player.color == Color.RED
-            assert player.num_simulations == 20
+            assert player.strategy_advisor is not None
+            assert player.strategy_advisor.num_simulations == 20
 
 
 class TestLLMValuePlayer:
@@ -735,27 +737,6 @@ class TestNegotiationWithTestModel:
 
 class TestToolsets:
     """Tests for the toolset functionality."""
-
-    def test_analysis_toolset_exists(self):
-        """Test ANALYSIS_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import ANALYSIS_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(ANALYSIS_TOOLSET, FunctionToolset)
-
-    def test_trade_toolset_exists(self):
-        """Test TRADE_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import TRADE_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(TRADE_TOOLSET, FunctionToolset)
-
-    def test_chat_toolset_exists(self):
-        """Test CHAT_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import CHAT_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(CHAT_TOOLSET, FunctionToolset)
 
     def test_normal_play_toolset(self):
         """Test NORMAL_PLAY_TOOLSET is properly defined."""
