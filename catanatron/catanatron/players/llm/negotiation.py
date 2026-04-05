@@ -576,6 +576,7 @@ class NegotiationManager:
         analysis tools. The agent should make exactly ONE tool call:
         send_message or leave_negotiation.
         """
+        import json
         from catanatron.players.llm.state_formatter import StateFormatter
 
         lines = []
@@ -587,9 +588,14 @@ class NegotiationManager:
         lines.append(f"Round: {session.current_round + 1}/{session.max_rounds}")
         lines.append("")
 
-        # Embed game state so the agent doesn't need to call analysis tools
+        # Embed structured game state inline
         if session.game is not None:
-            lines.append(StateFormatter.format_for_prompt(session.game, speaker))
+            game_state = StateFormatter.format_full_state(session.game, speaker)
+            game_state.get("my_state", {}).pop("color", None)
+            game_state_json = json.dumps(game_state, indent=2, default=str)
+            lines.append("=== STRUCTURED_STATE_JSON ===")
+            lines.append(game_state_json)
+            lines.append("=== END_STRUCTURED_STATE_JSON ===")
             lines.append("")
 
         # Trade directionality rules
@@ -632,8 +638,7 @@ class NegotiationManager:
             lines.append("    Do not keep chatting after accepting — leave immediately so the")
             lines.append("    initiator can finalize the offer.")
         lines.append("")
-        lines.append("Do NOT call send_message more than once. Do NOT call get_game_and_action_analysis")
-        lines.append("or analyze_board — the game state is already provided above.")
+        lines.append("Do NOT call send_message more than once. The game state is already provided above.")
 
         return "\n".join(lines)
     
@@ -644,6 +649,7 @@ class NegotiationManager:
         The initiator reviews the full conversation and their resources,
         then uses finalize_trade to submit the final offer.
         """
+        import json
         from catanatron.players.llm.state_formatter import StateFormatter
 
         lines = []
@@ -653,9 +659,14 @@ class NegotiationManager:
         lines.append(f"Participants: {[c.value for c in session.participants]}")
         lines.append("")
 
-        # Embed game state for the initiator
+        # Embed structured game state for the initiator
         if session.game is not None:
-            lines.append(StateFormatter.format_for_prompt(session.game, session.initiator))
+            game_state = StateFormatter.format_full_state(session.game, session.initiator)
+            game_state.get("my_state", {}).pop("color", None)
+            game_state_json = json.dumps(game_state, indent=2, default=str)
+            lines.append("=== STRUCTURED_STATE_JSON ===")
+            lines.append(game_state_json)
+            lines.append("=== END_STRUCTURED_STATE_JSON ===")
             lines.append("")
 
         # Trade directionality

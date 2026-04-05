@@ -27,7 +27,7 @@ from catanatron.players.llm.output_types import ActionByIndex
 def create_test_model(
     seed: int = 42,
     call_tools: Union[str, List[str]] = "all",
-    custom_result_text: Optional[str] = None,
+    custom_output_text: Optional[str] = None,
 ) -> TestModel:
     """
     Create a TestModel for deterministic testing.
@@ -42,7 +42,7 @@ def create_test_model(
             - "all": Call all available tools
             - "none": Don't call any tools
             - List of tool names: Only call specified tools
-        custom_result_text: Override the default result text
+        custom_output_text: Override the default result text
     
     Returns:
         Configured TestModel instance
@@ -55,7 +55,7 @@ def create_test_model(
     return TestModel(
         seed=seed,
         call_tools=call_tools,
-        custom_result_text=custom_result_text,
+        custom_output_text=custom_output_text,
     )
 
 

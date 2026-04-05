@@ -112,11 +112,18 @@ class TestStateFormatter:
     """Tests for the state formatter."""
 
     def test_format_full_state(self, game_after_initial_placement):
+        import json
         from catanatron.players.llm.state_formatter import StateFormatter
 
         state = StateFormatter.format_full_state(
             game_after_initial_placement, Color.RED
         )
+
+        print("\n" + "="*80)
+        print("FORMATTED STATE OBJECT:")
+        print("="*80)
+        print(json.dumps(state, indent=2))
+        print("="*80 + "\n")
 
         assert "my_color" in state
         assert state["my_color"] == "RED"
@@ -131,6 +138,12 @@ class TestStateFormatter:
         prompt = StateFormatter.format_for_prompt(
             game_after_initial_placement, Color.RED
         )
+
+        print("\n" + "="*80)
+        print("FORMATTED PROMPT:")
+        print("="*80)
+        print(prompt)
+        print("="*80)
 
         assert "RED" in prompt
         assert "Victory Points" in prompt
@@ -296,28 +309,35 @@ class TestPydanticAIPlayerWithMock:
     def test_history_cleared_on_new_turn(self, game_after_initial_placement):
         from catanatron.players.llm_player import PydanticAIPlayer
         from catanatron.players.llm.output_types import ActionByIndex
+        from catanatron.models.enums import ActionType
 
         game = game_after_initial_placement
+
+        # Create multiple playable actions so auto-play doesn't trigger
+        fake_actions = [
+            Action(Color.RED, ActionType.BUILD_ROAD, (0, 3)),
+            Action(Color.RED, ActionType.END_TURN, None),
+        ]
 
         with patch("catanatron.players.llm.base.Agent") as MockAgent:
             mock_agent = MagicMock()
             mock_result = MagicMock()
-            mock_result.data = ActionByIndex(action_index=0)
+            mock_result.output = ActionByIndex(action_index=0)
             mock_result.all_messages.return_value = [{"test": "message"}]
             mock_agent.run_sync.return_value = mock_result
             MockAgent.return_value = mock_agent
 
             player = PydanticAIPlayer(Color.RED)
 
-            # First decide call
-            player.decide(game, game.playable_actions)
+            # First decide call with multiple actions (avoids auto-play)
+            player.decide(game, fake_actions)
             assert player.history_manager.message_count > 0
 
             # Simulate turn change
             game.state.num_turns = 999
 
             # Second decide call should clear history
-            player.decide(game, game.playable_actions)
+            player.decide(game, fake_actions)
             assert player.history_manager.current_turn == 999
 
 
@@ -487,8 +507,8 @@ class TestModelConfig:
         
         settings = config.to_model_settings()
         assert settings is not None
-        assert settings.temperature == 0.5
-        assert settings.timeout == 60.0
+        assert settings["temperature"] == 0.5
+        assert settings["timeout"] == 60.0
 
     def test_create_model_with_string(self):
         """Test create_model with string input."""
@@ -599,8 +619,8 @@ class TestPlayerWithTestModel:
         assert player.max_tokens == 2048
         
         settings = player._get_model_settings()
-        assert settings.temperature == 0.7
-        assert settings.max_tokens == 2048
+        assert settings["temperature"] == 0.7
+        assert settings["max_tokens"] == 2048
 
 
 # ============= Tests with Scripted Responses =============
@@ -941,3 +961,44 @@ class TestIntegrationWithTestModel:
         # Both players should have negotiation manager set
         assert player1.negotiation_manager is manager
         assert player2.negotiation_manager is manager
+
+    def test_build_prompt_output(self, game_after_initial_placement):
+        """Test the final prompt that gets passed to the agent."""
+        from catanatron.players.llm_player import PydanticAIPlayer
+        
+        game = game_after_initial_placement
+        player = PydanticAIPlayer(Color.RED, model=TestModel(seed=42))
+        
+        # Call with no actions (minimal mode)
+        prompt_minimal = player._build_prompt(game)
+        
+        # Call with actions and strategy (full mode)
+        actions = game.playable_actions
+        prompt_full = player._build_prompt(game, playable_actions=actions)
+        
+        print("\n" + "="*80)
+        print("MINIMAL PROMPT (no actions):")
+        print("="*80)
+        print(prompt_minimal)
+        print("="*80)
+        print("\nFULL PROMPT (with actions):")
+        print("="*80)
+        print(prompt_full)
+        print("="*80)
+        print("\nSYSTEM PROMPT (from agent):")
+        print("="*80)
+        from catanatron.players.llm.base import CATAN_SYSTEM_PROMPT
+        print(CATAN_SYSTEM_PROMPT)
+        print("="*80 + "\n")
+        
+        # Verify minimal prompt contains header and state but no actions section
+        assert "=== CATAN GAME STATE ===" in prompt_minimal
+        assert "=== STRUCTURED_STATE_JSON ===" in prompt_minimal
+        assert "=== PLAYABLE_ACTIONS ===" not in prompt_minimal
+        assert "=== REASONING_AND_OUTPUT_REQUIREMENTS ===" in prompt_minimal
+        
+        # Verify full prompt contains all five sections
+        assert "=== CATAN GAME STATE ===" in prompt_full
+        assert "=== STRUCTURED_STATE_JSON ===" in prompt_full
+        assert "=== PLAYABLE_ACTIONS ===" in prompt_full
+        assert "=== REASONING_AND_OUTPUT_REQUIREMENTS ===" in prompt_full

@@ -6,6 +6,8 @@ their first argument. Toolsets are composed from these functions using
 FunctionToolset(tools=[...]) and selected at agent.run() time based on
 game state.
 
+Game state is inlined in the user prompt, so no analysis tools are needed.
+
 Trade offers are NOT a standalone tool. The only path to a domestic trade is:
 1. Player calls initiate_negotiation during normal play
 2. NegotiationManager runs messaging rounds (all players use NEGOTIATION_PARTICIPANT_TOOLSET)
@@ -13,22 +15,18 @@ Trade offers are NOT a standalone tool. The only path to a domestic trade is:
 4. The resulting OFFER_TRADE action is returned to the game engine
 
 Toolsets:
-- NORMAL_PLAY_TOOLSET: Analysis tools only (pre-roll or no trade available)
-- NORMAL_PLAY_WITH_TRADE_TOOLSET: Analysis + initiate_negotiation (after rolling)
-- NEGOTIATION_PARTICIPANT_TOOLSET: Analysis + chat tools (during negotiation messaging)
-- TRADE_FINALIZE_TOOLSET: Analysis + finalize_trade (post-negotiation trade decision)
+- NORMAL_PLAY_TOOLSET: No tools (state is in prompt, pre-roll or no trade available)
+- NORMAL_PLAY_WITH_TRADE_TOOLSET: initiate_negotiation (after rolling)
+- NEGOTIATION_PARTICIPANT_TOOLSET: Chat tools (during negotiation messaging)
+- TRADE_FINALIZE_TOOLSET: finalize_trade (post-negotiation trade decision)
 """
 
 from typing import List, Dict, Any
 from pydantic_ai import RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from catanatron.state_functions import (
-    get_visible_victory_points,
-    get_player_freqdeck,
-)
-from catanatron.models.enums import CITY, ActionType, Action
-from catanatron.models.map import LandTile
+from catanatron.state_functions import get_player_freqdeck
+from catanatron.models.enums import ActionType, Action
 
 # Import CatanDependencies directly for type hints in toolsets
 # This is needed because Pydantic AI evaluates type hints at runtime
@@ -38,64 +36,6 @@ from catanatron.players.llm.base import CatanDependencies
 # ============================================================================
 # Tool Functions
 # ============================================================================
-
-def get_game_and_action_analysis(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
-    """
-    Get comprehensive game state, available actions, and strategy recommendation.
-
-    Use this tool FIRST on every turn to understand the current game situation
-    before making any decisions.
-    """
-    from catanatron.players.llm.state_formatter import StateFormatter
-
-    full_analysis = {
-        "game_state": StateFormatter.format_full_state(ctx.deps.game, ctx.deps.color),
-        "available_actions": [
-            StateFormatter.format_action(action, i)
-            for i, action in enumerate(ctx.deps.playable_actions)
-        ],
-        "strategy_recommendation": (
-            ctx.deps.strategy_recommendation
-            if ctx.deps.strategy_recommendation
-            else "No strategy advisor configured"
-        ),
-        "strategy_reasoning": (
-            ctx.deps.strategy_reasoning
-            if ctx.deps.strategy_reasoning
-            else "No detailed reasoning available"
-        ),
-    }
-    return full_analysis
-
-
-def analyze_board(ctx: RunContext[CatanDependencies], focus: str) -> Dict[str, Any]:
-    """
-    Analyze the board for strategic insights.
-
-    Args:
-        focus: What to analyze. Options:
-            - 'expansion': Where can I build next, best spots
-            - 'blocking': How to block opponents' expansion
-            - 'ports': Port accessibility and trading options
-            - 'robber': Optimal robber placements
-    """
-    game = ctx.deps.game
-    my_color = ctx.deps.color
-
-    if focus == "expansion":
-        return _analyze_expansion(game, my_color)
-    elif focus == "blocking":
-        return _analyze_blocking(game, my_color)
-    elif focus == "ports":
-        return _analyze_ports(game, my_color)
-    elif focus == "robber":
-        return _analyze_robber(game, my_color)
-    else:
-        return {
-            "error": f"Unknown focus: {focus}",
-            "valid_options": ["expansion", "blocking", "ports", "robber"],
-        }
-
 
 def finalize_trade(
     ctx: RunContext[CatanDependencies],
@@ -253,187 +193,21 @@ def leave_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
 
 
 # ============================================================================
-# Board Analysis Helpers (private, used by analyze_board tool)
-# ============================================================================
-
-def _analyze_expansion(game, my_color) -> Dict[str, Any]:
-    """Analyze expansion opportunities."""
-    board = game.state.board
-
-    buildable_nodes = list(board.buildable_node_ids(my_color))
-    buildable_edges = [list(e) for e in board.buildable_edges(my_color)]
-
-    node_assessments = []
-    for node_id in buildable_nodes[:5]:
-        tiles = board.map.adjacent_tiles.get(node_id, [])
-        resources = []
-        total_prob = 0
-        for tile in tiles:
-            if isinstance(tile, LandTile) and tile.resource:
-                from catanatron.models.map import number_probability
-
-                prob = number_probability(tile.number) if tile.number else 0
-                resources.append(
-                    {"resource": tile.resource, "number": tile.number, "probability": prob}
-                )
-                total_prob += prob
-
-        node_assessments.append(
-            {
-                "node_id": node_id,
-                "resources": resources,
-                "total_production_probability": round(total_prob, 3),
-            }
-        )
-
-    node_assessments.sort(
-        key=lambda x: x["total_production_probability"], reverse=True
-    )
-
-    return {
-        "buildable_settlement_locations": len(buildable_nodes),
-        "buildable_road_locations": len(buildable_edges),
-        "best_settlement_spots": node_assessments,
-        "expansion_advice": (
-            "Focus on high-probability numbers (6, 8, 5, 9) and resource diversity"
-            if buildable_nodes
-            else "No settlement spots available - build roads to expand"
-        ),
-    }
-
-
-def _analyze_blocking(game, my_color) -> Dict[str, Any]:
-    """Analyze blocking opportunities."""
-    state = game.state
-    board = state.board
-
-    blocking_opportunities = []
-    for color in state.colors:
-        if color == my_color:
-            continue
-
-        their_buildable = list(board.buildable_node_ids(color, initial_build_phase=False))
-        my_buildable = set(board.buildable_node_ids(my_color))
-
-        overlap = [n for n in their_buildable if n in my_buildable]
-        if overlap:
-            blocking_opportunities.append(
-                {
-                    "opponent": color.value,
-                    "blockable_nodes": overlap[:3],
-                    "their_vps": get_visible_victory_points(state, color),
-                }
-            )
-
-    return {
-        "blocking_opportunities": blocking_opportunities,
-        "advice": (
-            "Consider blocking the leading player's expansion"
-            if blocking_opportunities
-            else "No immediate blocking opportunities"
-        ),
-    }
-
-
-def _analyze_ports(game, my_color) -> Dict[str, Any]:
-    """Analyze port access and trading."""
-    board = game.state.board
-    my_ports = list(board.get_player_port_resources(my_color))
-
-    port_info = {
-        "current_ports": my_ports,
-        "has_3_to_1_port": None in my_ports,
-        "specialized_ports": [p for p in my_ports if p is not None],
-    }
-
-    rates = {"wood": 4, "brick": 4, "sheep": 4, "wheat": 4, "ore": 4}
-    if None in my_ports:
-        rates = {r: 3 for r in rates}
-    for port_resource in my_ports:
-        if port_resource:
-            rates[port_resource.lower()] = 2
-
-    port_info["trading_rates"] = rates
-    port_info["advice"] = (
-        "Good port access - consider using maritime trades"
-        if len(my_ports) > 0
-        else "No ports yet - consider building towards coastal settlements"
-    )
-
-    return port_info
-
-
-def _analyze_robber(game, my_color) -> Dict[str, Any]:
-    """Analyze robber placement options."""
-    state = game.state
-    board = state.board
-
-    placements = []
-    for coord, tile in board.map.tiles.items():
-        if not isinstance(tile, LandTile) or tile.resource is None:
-            continue
-        if coord == board.robber_coordinate:
-            continue
-
-        affected = {}
-        for node_id in tile.nodes.values():
-            building = board.buildings.get(node_id)
-            if building:
-                color, btype = building
-                if color != my_color:
-                    if color.value not in affected:
-                        affected[color.value] = 0
-                    affected[color.value] += 2 if btype == CITY else 1
-
-        if affected:
-            from catanatron.models.map import number_probability
-
-            prob = number_probability(tile.number) if tile.number else 0
-            placements.append(
-                {
-                    "coordinate": coord,
-                    "resource": tile.resource,
-                    "number": tile.number,
-                    "probability": prob,
-                    "affected_players": affected,
-                    "total_impact": sum(affected.values()) * prob,
-                }
-            )
-
-    placements.sort(key=lambda x: x["total_impact"], reverse=True)
-
-    return {
-        "best_robber_placements": placements[:5],
-        "current_robber_location": board.robber_coordinate,
-        "advice": "Target the leading player's highest-production tile",
-    }
-
-
-# ============================================================================
 # Toolset Composition
 # ============================================================================
 
-NORMAL_PLAY_TOOLSET = FunctionToolset(tools=[
-    get_game_and_action_analysis,
-    analyze_board,
-])
+NORMAL_PLAY_TOOLSET = FunctionToolset(tools=[])
 
 NORMAL_PLAY_WITH_TRADE_TOOLSET = FunctionToolset(tools=[
-    get_game_and_action_analysis,
-    analyze_board,
     initiate_negotiation,
 ])
 
 NEGOTIATION_PARTICIPANT_TOOLSET = FunctionToolset(tools=[
-    get_game_and_action_analysis,
-    analyze_board,
     send_message,
     leave_negotiation,
 ])
 
 TRADE_FINALIZE_TOOLSET = FunctionToolset(tools=[
-    get_game_and_action_analysis,
-    analyze_board,
     finalize_trade,
 ])
 

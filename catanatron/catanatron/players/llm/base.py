@@ -23,7 +23,10 @@ from catanatron.models.enums import Action, ActionPrompt, ActionType
 from catanatron.players.llm.output_types import ActionByIndex
 from catanatron.players.llm.history import ConversationHistoryManager
 from catanatron.players.llm.models import create_model, ModelConfig, ModelInput
+from catanatron.players.llm.state_formatter import StateFormatter
 from catanatron.state_functions import player_has_rolled
+
+import json
 
 try:
     import logfire
@@ -77,9 +80,9 @@ CATAN_SYSTEM_PROMPT = """You are an expert Settlers of Catan player. Your goal i
 - Balance between expansion and resource accumulation
 
 ## Decision Making
-Every turn use the `get_game_and_action_analysis` tool IMMEDIATELY before doing any thinking or reasoning. Do this exactly once per turn to get a comprehensive analysis of the game state and available actions.
-Use the available tools to analyze the game state before making decisions.
-When `initiate_negotiation` is available, prefer domestic trade over maritime trade. Calling `initiate_negotiation` opens a chat with other players; after the conversation you will specify your trade offer.
+The full game state, legal actions, and strategy hints are provided in the user message each turn. Read them carefully before deciding.
+Use the available tools when helpful.
+When `initiate_negotiation` is available, prefer domestic trade over maritime trade.
 You can only negotiate once per turn; once the negotiation concludes no further trading is allowed that turn.
 Consider both immediate gains and long-term strategy.
 Pay attention to the negotiation history and performance of the other players.
@@ -123,7 +126,7 @@ class BaseLLMPlayer(Player):
         tool_calls_limit: int = 10,
         is_bot: bool = True,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        max_tokens: Optional[int] = 1024,
     ):
         """
         Initialize the LLM player.
@@ -390,14 +393,32 @@ class BaseLLMPlayer(Player):
 
         return explanation
 
-    def _build_prompt(self, game: Game) -> str:
-        """Build the user prompt for the current decision."""
-        state = game.state
-        prompt_parts = []
+    def _build_prompt(
+        self,
+        game: Game,
+        playable_actions: Optional[List[Action]] = None,
+        strategy_recommendation: Optional[Action] = None,
+        strategy_reasoning: Optional[str] = None,
+    ) -> str:
+        """Build the user prompt with inline game state, actions, and strategy.
 
-        # Current phase
-        prompt_parts.append(f"Current phase: {state.current_prompt.value}")
-        prompt_parts.append(f"Turn number: {state.num_turns}")
+        Produces five sections:
+        1. Human-readable header
+        2. Compact JSON observation (STRUCTURED_STATE_JSON)
+        3. Legal / playable actions (PLAYABLE_ACTIONS)
+        4. Strategy hint from the advisor model (STRATEGY_HINT) — omitted when absent
+        5. Reasoning + output-format instructions
+        """
+        state = game.state
+        parts: List[str] = []
+
+        # ── 1. Header ──────────────────────────────────────────────────
+        parts.append("=== CATAN GAME STATE ===")
+        parts.append(f"Turn: {state.num_turns}")
+        parts.append(f"Phase: {state.current_prompt.value}")
+        parts.append(f"You are: {self.color.value}")
+        if state.is_initial_build_phase:
+            parts.append(f"Initial build phase: {state.is_initial_build_phase}")
 
         # Trade context if applicable
         if state.is_resolving_trade:
@@ -406,27 +427,68 @@ class BaseLLMPlayer(Player):
             resource_names = ["wood", "brick", "sheep", "wheat", "ore"]
             offer_str = ", ".join(f"{resource_names[i]}: {v}" for i, v in enumerate(offer) if v > 0)
             ask_str = ", ".join(f"{resource_names[i]}: {v}" for i, v in enumerate(ask) if v > 0)
-            prompt_parts.append(f"Active trade - Offering: [{offer_str}], Asking: [{ask_str}]")
+            parts.append(f"Active trade - Offering: [{offer_str}], Asking: [{ask_str}]")
         
         # Include negotiation history for DECIDE_TRADE
         if state.current_prompt == ActionPrompt.DECIDE_TRADE:
             negotiation_context = self.get_negotiation_context()
             if negotiation_context and negotiation_context != "No prior negotiation.":
-                prompt_parts.append("\n=== PRIOR NEGOTIATION ===")
-                prompt_parts.append(negotiation_context)
-                prompt_parts.append("=========================")
-                prompt_parts.append(
-                    "\nConsider the negotiation context when deciding whether to accept or reject."
+                parts.append("")
+                parts.append("=== PRIOR NEGOTIATION ===")
+                parts.append(negotiation_context)
+                parts.append("=========================")
+                parts.append(
+                    "Consider the negotiation context when deciding whether to accept or reject."
                 )
 
-        prompt_parts.append(
-            "\nUse the available tools to understand the game state, then choose your action."
-        )
-        prompt_parts.append(
-            "Return the index of your chosen action from the available actions list."
-        )
+        parts.append("")  # blank line separator
 
-        return "\n".join(prompt_parts)
+        # ── 2. Structured state JSON ───────────────────────────────────
+        game_state = StateFormatter.format_full_state(game, self.color)
+        # Remove redundant color from my_state (already at top level)
+        game_state.get("my_state", {}).pop("color", None)
+        # Trim zero-valued resource / dev-card entries to save tokens
+        game_state_json = json.dumps(game_state, indent=2, default=str)
+        parts.append("=== STRUCTURED_STATE_JSON ===")
+        parts.append(game_state_json)
+        parts.append("=== END_STRUCTURED_STATE_JSON ===")
+        parts.append("")  # blank line separator
+
+        # ── 3. Playable actions ────────────────────────────────────────
+        if playable_actions:
+            parts.append("=== PLAYABLE_ACTIONS ===")
+            parts.append("You must choose exactly one of these actions.")
+            parts.append("")
+            for i, action in enumerate(playable_actions):
+                action_dict = StateFormatter.format_action(action, i)
+                parts.append(f"{i}: {json.dumps(action_dict, default=str)}")
+            parts.append("=== END_PLAYABLE_ACTIONS ===")
+            parts.append("")  # blank line separator
+
+        # ── 4. Strategy hint (only when present) ───────────────────────
+        if strategy_recommendation is not None:
+            rec_desc = StateFormatter.format_action(strategy_recommendation, -1)
+            parts.append("=== STRATEGY_HINT ===")
+            parts.append("Baseline strategy model suggests:")
+            parts.append(f"- Recommended action: {rec_desc.get('description', str(strategy_recommendation))}")
+            parts.append(f"- Reasoning: {strategy_reasoning or 'No detailed reasoning available'}")
+            parts.append(
+                "You may follow or ignore this suggestion, but you must still pick one of the PLAYABLE_ACTIONS."
+            )
+            parts.append("=== END_STRATEGY_HINT ===")
+            parts.append("")  # blank line separator
+
+        # ── 5. Reasoning + output instructions ─────────────────────────
+        parts.append("=== REASONING_AND_OUTPUT_REQUIREMENTS ===")
+        parts.append("Think about your position, compare at least 2 candidate actions, then pick one.")
+        parts.append("Keep your reasoning CONCISE — at most 3–4 sentences total.")
+        parts.append("")
+        parts.append('You MUST respond in valid JSON only, in this exact format:')
+        parts.append('{"reasoning": "brief analysis (3-4 sentences max)", "action_id": <integer>, "confidence": <float between 0 and 1>}')
+        parts.append("Do not include any extra keys or any text outside this JSON.")
+        parts.append("=== END_REASONING_AND_OUTPUT_REQUIREMENTS ===")
+
+        return "\n".join(parts)
 
     def _is_auto_play_action(self, playable_actions: List[Action]) -> bool:
         """Check if there's only one forced action that doesn't need LLM reasoning."""
@@ -580,7 +642,7 @@ class BaseLLMPlayer(Player):
             model_settings = self._get_model_settings()
 
             result = self.agent.run_sync(
-                self._build_prompt(game),
+                self._build_prompt(game, playable_actions, recommendation, reasoning),
                 deps=deps,
                 message_history=self.history_manager.get_messages(),
                 toolsets=toolsets,
@@ -612,7 +674,7 @@ class BaseLLMPlayer(Player):
                 # Negotiation ended without trade -- re-run agent to continue turn
                 # (trade tools are now disabled since initiated_this_turn is set)
                 result = self.agent.run_sync(
-                    self._build_prompt(game),
+                    self._build_prompt(game, playable_actions, recommendation, reasoning),
                     deps=deps,
                     message_history=self.history_manager.get_messages(),
                     toolsets=self._select_toolsets(game),

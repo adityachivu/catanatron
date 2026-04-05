@@ -50,8 +50,8 @@ Toolsets:
     Tools are now managed via toolsets that can be dynamically selected at
     runtime based on game state. Available toolsets:
     
-    - NORMAL_PLAY_TOOLSET: Analysis tools for normal gameplay
-    - NORMAL_PLAY_WITH_TRADE_TOOLSET: Analysis + initiate_negotiation
+    - NORMAL_PLAY_TOOLSET: No tools (state is inlined in prompt)
+    - NORMAL_PLAY_WITH_TRADE_TOOLSET: initiate_negotiation (after rolling)
     - NEGOTIATION_PARTICIPANT_TOOLSET: Tools for negotiation messaging
     - TRADE_FINALIZE_TOOLSET: Tools for post-negotiation trade finalization
 """
