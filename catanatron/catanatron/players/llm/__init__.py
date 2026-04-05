@@ -50,10 +50,10 @@ Toolsets:
     Tools are now managed via toolsets that can be dynamically selected at
     runtime based on game state. Available toolsets:
     
-    - NORMAL_PLAY_TOOLSET: Analysis tools for normal gameplay
-    - NORMAL_PLAY_WITH_TRADE_TOOLSET: Analysis + trade tools
-    - NEGOTIATION_PARTICIPANT_TOOLSET: Tools for negotiation participants
-    - NEGOTIATION_INITIATOR_TOOLSET: Tools for negotiation initiators
+    - NORMAL_PLAY_TOOLSET: No tools (state is inlined in prompt)
+    - NORMAL_PLAY_WITH_TRADE_TOOLSET: initiate_negotiation (after rolling)
+    - NEGOTIATION_PARTICIPANT_TOOLSET: Tools for negotiation messaging
+    - TRADE_FINALIZE_TOOLSET: Tools for post-negotiation trade finalization
 """
 
 from catanatron.players.llm.base import BaseLLMPlayer, CatanDependencies
@@ -94,15 +94,10 @@ from catanatron.players.llm.negotiation import (
 
 # Toolsets for external use/testing
 from catanatron.players.llm.toolsets import (
-    ANALYSIS_TOOLSET,
-    TRADE_TOOLSET,
-    CHAT_TOOLSET,
     NORMAL_PLAY_TOOLSET,
     NORMAL_PLAY_WITH_TRADE_TOOLSET,
     NEGOTIATION_PARTICIPANT_TOOLSET,
-    NEGOTIATION_INITIATOR_TOOLSET,
-    NegotiationDependencies,
-    get_all_tools,
+    TRADE_FINALIZE_TOOLSET,
     get_toolsets_for_game_state,
 )
 
@@ -138,17 +133,12 @@ __all__ = [
     "NegotiationManager",
     "NegotiationSession",
     "NegotiationMessage",
-    "NegotiationDependencies",
     "setup_negotiation",
-    
+
     # Toolsets
-    "ANALYSIS_TOOLSET",
-    "TRADE_TOOLSET",
-    "CHAT_TOOLSET",
     "NORMAL_PLAY_TOOLSET",
     "NORMAL_PLAY_WITH_TRADE_TOOLSET",
     "NEGOTIATION_PARTICIPANT_TOOLSET",
-    "NEGOTIATION_INITIATOR_TOOLSET",
-    "get_all_tools",
+    "TRADE_FINALIZE_TOOLSET",
     "get_toolsets_for_game_state",
 ]

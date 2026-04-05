@@ -347,8 +347,9 @@ class TestLLMAlphaBetaPlayer:
                 Color.RED, model="test:model", depth=3, prunning=True
             )
             assert player.color == Color.RED
-            assert player.depth == 3
-            assert player.prunning == True
+            assert player.strategy_advisor is not None
+            assert player.strategy_advisor.depth == 3
+            assert player.strategy_advisor.prunning == True
 
     def test_repr(self):
         from catanatron.players.llm_player import LLMAlphaBetaPlayer
@@ -375,7 +376,8 @@ class TestLLMMCTSPlayer:
                 Color.RED, model="test:model", num_simulations=20
             )
             assert player.color == Color.RED
-            assert player.num_simulations == 20
+            assert player.strategy_advisor is not None
+            assert player.strategy_advisor.num_simulations == 20
 
 
 class TestLLMValuePlayer:
@@ -749,27 +751,6 @@ class TestNegotiationWithTestModel:
 class TestToolsets:
     """Tests for the toolset functionality."""
 
-    def test_analysis_toolset_exists(self):
-        """Test ANALYSIS_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import ANALYSIS_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(ANALYSIS_TOOLSET, FunctionToolset)
-
-    def test_trade_toolset_exists(self):
-        """Test TRADE_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import TRADE_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(TRADE_TOOLSET, FunctionToolset)
-
-    def test_chat_toolset_exists(self):
-        """Test CHAT_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import CHAT_TOOLSET
-        from pydantic_ai.toolsets import FunctionToolset
-        
-        assert isinstance(CHAT_TOOLSET, FunctionToolset)
-
     def test_normal_play_toolset(self):
         """Test NORMAL_PLAY_TOOLSET is properly defined."""
         from catanatron.players.llm.toolsets import NORMAL_PLAY_TOOLSET
@@ -791,12 +772,12 @@ class TestToolsets:
         
         assert isinstance(NEGOTIATION_PARTICIPANT_TOOLSET, FunctionToolset)
 
-    def test_negotiation_initiator_toolset(self):
-        """Test NEGOTIATION_INITIATOR_TOOLSET is properly defined."""
-        from catanatron.players.llm.toolsets import NEGOTIATION_INITIATOR_TOOLSET
+    def test_trade_finalize_toolset(self):
+        """Test TRADE_FINALIZE_TOOLSET is properly defined."""
+        from catanatron.players.llm.toolsets import TRADE_FINALIZE_TOOLSET
         from pydantic_ai.toolsets import FunctionToolset
         
-        assert isinstance(NEGOTIATION_INITIATOR_TOOLSET, FunctionToolset)
+        assert isinstance(TRADE_FINALIZE_TOOLSET, FunctionToolset)
 
     def test_get_toolsets_for_game_state_normal_play(self):
         """Test get_toolsets_for_game_state returns correct toolsets for normal play."""
@@ -833,11 +814,11 @@ class TestToolsets:
         
         assert NORMAL_PLAY_WITH_TRADE_TOOLSET in toolsets
 
-    def test_get_toolsets_for_game_state_negotiation_initiator(self):
-        """Test get_toolsets_for_game_state returns initiator toolset."""
+    def test_get_toolsets_for_game_state_finalization(self):
+        """Test get_toolsets_for_game_state returns finalize toolset."""
         from catanatron.players.llm.toolsets import (
             get_toolsets_for_game_state,
-            NEGOTIATION_INITIATOR_TOOLSET,
+            TRADE_FINALIZE_TOOLSET,
         )
         
         toolsets = get_toolsets_for_game_state(
@@ -845,11 +826,10 @@ class TestToolsets:
             color=Color.RED,
             has_rolled=True,
             is_my_turn=True,
-            in_negotiation=True,
-            is_negotiation_initiator=True,
+            is_finalization_phase=True,
         )
         
-        assert NEGOTIATION_INITIATOR_TOOLSET in toolsets
+        assert TRADE_FINALIZE_TOOLSET in toolsets
 
     def test_get_toolsets_for_game_state_negotiation_participant(self):
         """Test get_toolsets_for_game_state returns participant toolset."""
@@ -864,7 +844,6 @@ class TestToolsets:
             has_rolled=False,
             is_my_turn=False,
             in_negotiation=True,
-            is_negotiation_initiator=False,
         )
         
         assert NEGOTIATION_PARTICIPANT_TOOLSET in toolsets

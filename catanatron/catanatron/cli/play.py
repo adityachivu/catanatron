@@ -18,7 +18,15 @@ from catanatron.models.map import build_map
 from catanatron.state_functions import get_actual_victory_points
 
 # Optional Logfire integration for orchestration logging
-import logfire
+try:
+    import logfire
+
+    _LOGFIRE_AVAILABLE = True
+except ImportError:
+    logfire = None  # type: ignore[assignment]
+    _LOGFIRE_AVAILABLE = False
+
+_logfire_enabled = False
 
 # try to suppress TF output before any potentially tf-importing modules
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -142,6 +150,13 @@ class CustomTimeRemainingColumn(TimeRemainingColumn):
     help="Show player codes and exits.",
     is_flag=True,
 )
+@click.option(
+    "--logfire",
+    "enable_logfire",
+    default=False,
+    is_flag=True,
+    help="Enable Logfire monitoring. Also enabled by CATAN_LOGFIRE=1 env var.",
+)
 def simulate(
     num,
     players,
@@ -156,6 +171,7 @@ def simulate(
     config_map,
     quiet,
     help_players,
+    enable_logfire,
 ):
     """
     Catan Bot Simulator.
@@ -168,13 +184,17 @@ def simulate(
         catanatron-play --players VP,F --num 10 --output data/ --ouput-format json\n
         catanatron-play --players W,F,AB:3 --num 1 --ouput-format csv --db --quiet
     """
-    # Configure Logfire - send to service but don't interfere with console output
-    logfire.configure(
-        send_to_logfire=True,
-        console=False,  # Don't print logs to console to avoid interfering with Rich
-    )
-    logfire.instrument_pydantic_ai()
-    
+    # Configure Logfire only when explicitly enabled
+    global _logfire_enabled
+    _logfire_enabled = enable_logfire or os.environ.get("CATAN_LOGFIRE", "").strip() in ("1", "true", "yes")
+    if _LOGFIRE_AVAILABLE:
+        logfire.configure(
+            send_to_logfire=_logfire_enabled,
+            console=False,
+        )
+        if _logfire_enabled:
+            logfire.instrument_pydantic_ai()
+
     if code:
         abspath = os.path.abspath(code)
         spec = importlib.util.spec_from_file_location("module.name", abspath)
@@ -193,21 +213,13 @@ def simulate(
     )
     game_config = GameConfigOptions(config_discard_limit, config_vps_to_win, config_map)
     
-    # Wrap play_batch with Logfire span if available
-    with logfire.span(
-        "catanatron.play_batch",
-        num_games=num,
-        num_players=len(players),
-        output_format=output_format,
-        map_type=config_map,
-    ):
-        play_batch(
-            num,
-            players,
-            output_options,
-            game_config,
-            quiet,
-        )
+    play_batch(
+        num,
+        players,
+        output_options,
+        game_config,
+        quiet,
+    )
 
 
 @dataclass(frozen=True)
@@ -249,19 +261,26 @@ def rich_color(color):
 
 
 def play_batch_core(num_games, players, game_config, accumulators=[]):
+    from contextlib import nullcontext
+
     for accumulator in accumulators:
         if isinstance(accumulator, SimulationAccumulator):
             accumulator.before_all()
 
-    for game_num in range(num_games):
-        # Wrap each game with Logfire span if available
-        with logfire.span(
-            "catanatron.play_game",
-            game_number=game_num + 1,
-            total_games=num_games,
-            game_uuid=uuid.uuid4(),
-            map_type=game_config.catan_map,
-        ):
+    player_codes = [str(p) for p in players]
+    batch_ctx = (
+        logfire.span(
+            "catanatron.play_batch",
+            num_games=num_games,
+            players=player_codes,
+            map=game_config.catan_map,
+            vps_to_win=game_config.vps_to_win,
+        )
+        if logfire is not None
+        else nullcontext()
+    )
+    with batch_ctx:
+        for game_num in range(num_games):
             for player in players:
                 player.reset_state()
             catan_map = build_map(game_config.catan_map)
@@ -273,11 +292,27 @@ def play_batch_core(num_games, players, game_config, accumulators=[]):
             )
             from catanatron.players.llm.base import BaseLLMPlayer
             from catanatron.players.llm.negotiation import setup_negotiation
-            manager = setup_negotiation(game, max_rounds=10)  # Must be called manually
+            manager = setup_negotiation(game, max_rounds=10)
             for player in players:
                 if isinstance(player, BaseLLMPlayer):
                     manager.register_player(player)
-            game.play(accumulators)
+
+            game_ctx = (
+                logfire.span(
+                    "catanatron.play_game",
+                    game_number=game_num + 1,
+                    game_id=game.id,
+                    seating=[c.value for c in game.state.colors],
+                )
+                if logfire is not None
+                else nullcontext()
+            )
+            with game_ctx as game_span:
+                game.play(accumulators)
+                if game_span is not None:
+                    winner = game.winning_color()
+                    game_span.set_attribute("winner", winner.value if winner else None)
+                    game_span.set_attribute("num_turns", game.state.num_turns)
             yield game
 
     for accumulator in accumulators:
@@ -294,17 +329,6 @@ def play_batch(
 ):
     output_options = output_options or OutputOptions()
     game_config = game_config or GameConfigOptions()
-
-    # Log player types if Logfire is available
-    # if LOGFIRE_AVAILABLE:
-    #     player_types = [type(p).__name__ for p in players]
-    #     logfire.info(
-    #         "Starting batch simulation",
-    #         num_games=num_games,
-    #         players=player_types,
-    #         output_format=output_options.output_format,
-    #         map_type=game_config.catan_map,
-    #     )
 
     statistics_accumulator = StatisticsAccumulator()
     vp_accumulator = VpDistributionAccumulator()
@@ -486,17 +510,6 @@ def play_batch(
         console.print(
             f"{output_options.output_format} files saved at: [green]{output_options.output}[/green]"
         )
-
-    # Log summary to Logfire if available
-    # if LOGFIRE_AVAILABLE:
-    #     logfire.info(
-    #         "Batch simulation completed",
-    #         num_games=num_games,
-    #         avg_ticks=statistics_accumulator.get_avg_ticks(),
-    #         avg_turns=statistics_accumulator.get_avg_turns(),
-    #         avg_duration=statistics_accumulator.get_avg_duration(),
-    #         wins=dict(statistics_accumulator.wins),
-    #     )
 
     return (
         dict(statistics_accumulator.wins),

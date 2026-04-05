@@ -210,17 +210,19 @@ def trade_offer_script(
     pre_messages: Optional[List[str]] = None,
 ) -> FunctionModel:
     """
-    Create a FunctionModel that makes a trade offer.
+    Create a FunctionModel that finalizes a trade offer.
     
-    Optionally sends negotiation messages first.
+    This model is designed for the finalization phase of negotiation,
+    where the initiator specifies the final trade values via finalize_trade.
+    Optionally sends negotiation messages first (for the messaging phase).
     
     Args:
         offer: Resources to offer [wood, brick, sheep, wheat, ore]
         ask: Resources to ask for [wood, brick, sheep, wheat, ore]
-        pre_messages: Optional messages to send before making the offer
+        pre_messages: Optional messages to send during the messaging phase
     
     Returns:
-        FunctionModel configured to make the trade offer
+        FunctionModel configured to finalize the trade offer
     
     Example:
         model = trade_offer_script(
@@ -231,7 +233,6 @@ def trade_offer_script(
     """
     responses: List[Union[ActionByIndex, Dict[str, Any]]] = []
     
-    # Add pre-negotiation messages if any
     if pre_messages:
         for msg in pre_messages:
             responses.append({
@@ -239,13 +240,11 @@ def trade_offer_script(
                 "args": {"message": msg}
             })
     
-    # Make the trade offer
     responses.append({
-        "tool": "trade_offer",
+        "tool": "finalize_trade",
         "args": {"offer": offer, "ask": ask}
     })
     
-    # Fallback action in case trade_offer doesn't end the turn
     responses.append(ActionByIndex(action_index=0))
     
     return scripted_response(responses, loop=False)

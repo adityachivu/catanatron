@@ -5,6 +5,12 @@ This module provides multi-player negotiation capabilities that run outside
 the game engine, allowing LLM players to discuss trades before making
 formal offers.
 
+The negotiation flow has two phases:
+1. Messaging phase: Up to k rounds of round-robin chat between all players.
+   All players (including the initiator) use the same NEGOTIATION_PARTICIPANT_TOOLSET.
+2. Finalization phase: One LLM call to the initiator with the TRADE_FINALIZE_TOOLSET,
+   where they review the conversation and specify their final trade offer.
+
 Key Components:
 - NegotiationMessage: A single message in a negotiation
 - NegotiationSession: State of an active negotiation
@@ -15,7 +21,7 @@ Usage:
     from catanatron.players.llm.negotiation import setup_negotiation
     
     game = Game(players)
-    manager = setup_negotiation(game, max_rounds=10)
+    manager = setup_negotiation(game, max_rounds=3)
     winner = game.play()
 """
 
@@ -23,15 +29,25 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Any, TYPE_CHECKING
 import time
 
-import logfire
-from pydantic_ai import RunContext, UsageLimits
+try:
+    import logfire
+except ImportError:
+    logfire = None  # type: ignore[assignment]
+from contextlib import nullcontext
+from pydantic_ai import UsageLimits
+from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
 
 from catanatron.game import Game
 from catanatron.models.player import Color
-from catanatron.models.enums import Action, ActionType
+from catanatron.models.enums import Action
 
 if TYPE_CHECKING:
-    from catanatron.players.llm.base import BaseLLMPlayer, CatanDependencies
+    from catanatron.players.llm.base import BaseLLMPlayer
+
+MAX_NEGOTIATION_RETRIES = 3
+RETRY_BACKOFF_SECONDS = 2.0
+MESSAGING_TOOL_CALLS_LIMIT = 1  # One message (or leave) per turn for round-robin
+FINALIZATION_TOOL_CALLS_LIMIT = 10
 
 
 @dataclass
@@ -276,21 +292,45 @@ class NegotiationManager:
             game=game,
         )
         
-        # Run the negotiation loop with logfire span
-        with logfire.span(
-            "catanatron.negotiation_session",
-            initiator=initiator.value,
-            participants=[c.value for c in participants],
-            turn_number=turn,
-            max_rounds=self.max_rounds,
-        ) as span:
+        # Run the negotiation loop with optional logfire span
+        span_ctx = (
+            logfire.span(
+                "catanatron.negotiation_session",
+                initiator=initiator.value,
+                participants=[c.value for c in participants],
+                turn_number=turn,
+                max_rounds=self.max_rounds,
+            )
+            if logfire is not None
+            else nullcontext()
+        )
+        with span_ctx as span:
             trade_action = self._run_negotiation_loop(game)
-            
-            # Set final attributes
-            if self.current_session:
+
+            if span is not None and self.current_session:
                 span.set_attribute("messages_count", len(self.current_session.messages))
                 span.set_attribute("final_round", self.current_session.current_round)
-            span.set_attribute("resulted_in_trade", trade_action is not None)
+                span.set_attribute("negotiation_messages", [
+                    {"sender": m.sender.value, "content": m.content}
+                    for m in self.current_session.messages
+                ])
+
+            if span is not None:
+                span.set_attribute("resulted_in_trade", trade_action is not None)
+            if trade_action is not None and span is not None:
+                resource_names = ["wood", "brick", "sheep", "wheat", "ore"]
+                offer_values = trade_action.value[:5]
+                ask_values = trade_action.value[5:10]
+                span.set_attribute("trade_offer", {
+                    "offering": {
+                        resource_names[i]: v
+                        for i, v in enumerate(offer_values) if v > 0
+                    },
+                    "asking": {
+                        resource_names[i]: v
+                        for i, v in enumerate(ask_values) if v > 0
+                    },
+                })
         
         # End the session and distribute history
         self._end_negotiation()
@@ -310,13 +350,15 @@ class NegotiationManager:
     
     def _run_negotiation_loop(self, game: Game) -> Optional[Action]:
         """
-        Run the main negotiation loop.
+        Run the two-phase negotiation process.
         
-        Each participant speaks in turn (round-robin from initiator).
-        The loop ends when:
-        - Initiator makes a trade offer
-        - Max rounds reached
+        Phase 1 (Messaging): Up to max_rounds of round-robin chat. All players
+        (including initiator) use NEGOTIATION_PARTICIPANT_TOOLSET. Ends when:
+        - max_rounds reached
         - All non-initiator participants leave
+        
+        Phase 2 (Finalization): One LLM call to the initiator with
+        TRADE_FINALIZE_TOOLSET to specify the final trade offer.
         
         Args:
             game: The current game
@@ -324,106 +366,249 @@ class NegotiationManager:
         Returns:
             OFFER_TRADE action if initiator made one, else None
         """
-        from catanatron.players.llm.toolsets import (
-            NEGOTIATION_INITIATOR_TOOLSET,
-            NEGOTIATION_PARTICIPANT_TOOLSET,
-        )
-        from catanatron.players.llm.base import CatanDependencies
-        
         session = self.current_session
         if session is None:
             return None
+        
+        self._run_messaging_phase(game, session)
+        return self._run_finalization_phase(game, session)
+    
+    def _run_messaging_phase(self, game: Game, session: NegotiationSession) -> None:
+        """
+        Phase 1: Round-robin messaging between all participants.
+        
+        All players (including the initiator) use the same participant toolset
+        with send_message and leave_negotiation tools.
+        """
+        from catanatron.players.llm.toolsets import NEGOTIATION_PARTICIPANT_TOOLSET
+        from catanatron.players.llm.base import CatanDependencies
         
         while session.is_active:
             current_color = session.current_speaker
             player = self.players.get(current_color)
             
             if player is None:
-                # Player was unregistered, skip
                 session.advance_turn()
                 continue
             
-            # Build negotiation-specific prompt
-            prompt = self._build_negotiation_prompt(session, current_color)
+            prompt = self._build_messaging_prompt(session, current_color)
             
-            # Build dependencies
             deps = CatanDependencies(
                 color=current_color,
                 game=game,
-                playable_actions=[],  # No game actions during negotiation
+                playable_actions=[],
                 strategy_recommendation=None,
                 strategy_reasoning=None,
                 turn_number=game.state.num_turns,
-                is_my_turn=False,  # Not really their turn in game terms
+                is_my_turn=False,
                 negotiation_manager=self,
                 player_instance=player,
             )
             
-            # Select toolset based on whether this is the initiator
-            if session.is_initiator_turn:
-                toolsets = [NEGOTIATION_INITIATOR_TOOLSET]
-            else:
-                toolsets = [NEGOTIATION_PARTICIPANT_TOOLSET]
+            for attempt in range(MAX_NEGOTIATION_RETRIES):
+                try:
+                    player.agent.run_sync(
+                        prompt,
+                        deps=deps,
+                        toolsets=[NEGOTIATION_PARTICIPANT_TOOLSET],
+                        usage_limits=UsageLimits(
+                            tool_calls_limit=MESSAGING_TOOL_CALLS_LIMIT,
+                        ),
+                    )
+                    break
+                except UsageLimitExceeded:
+                    # The agent tried to call multiple tools despite the prompt
+                    # instructing it to call only one. Log as a warning — the
+                    # first tool call still went through so the turn is usable.
+                    if logfire is not None:
+                        logfire.warning(
+                            f"Negotiation messaging usage limit exceeded for {current_color} "
+                            "(agent attempted multiple tool calls)",
+                            color=current_color.value,
+                        )
+                    break
+                except ModelHTTPError as e:
+                    if e.status_code == 503 and attempt < MAX_NEGOTIATION_RETRIES - 1:
+                        if logfire is not None:
+                            logfire.warning(
+                                f"Negotiation messaging 503 retry {attempt + 1} for {current_color}",
+                                color=current_color.value,
+                            )
+                        time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    elif attempt < MAX_NEGOTIATION_RETRIES - 1:
+                        if logfire is not None:
+                            logfire.warning(
+                                f"Negotiation messaging HTTP {e.status_code} retry {attempt + 1} for {current_color}",
+                                color=current_color.value,
+                            )
+                        time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    else:
+                        if logfire is not None:
+                            logfire.error(
+                                f"Negotiation messaging error for {current_color} after {MAX_NEGOTIATION_RETRIES} attempts: {e}",
+                                color=current_color.value,
+                            )
+                except Exception as e:
+                    if attempt < MAX_NEGOTIATION_RETRIES - 1:
+                        if logfire is not None:
+                            logfire.warning(
+                                f"Negotiation messaging retry {attempt + 1} for {current_color}: {e}",
+                                color=current_color.value,
+                            )
+                        time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                    else:
+                        if logfire is not None:
+                            logfire.error(
+                                f"Negotiation messaging error for {current_color} after {MAX_NEGOTIATION_RETRIES} attempts: {e}",
+                                color=current_color.value,
+                            )
             
-            # Run the player's agent
-            try:
-                result = player.agent.run_sync(
-                    prompt,
-                    deps=deps,
-                    toolsets=toolsets,
-                    usage_limits=UsageLimits(tool_calls_limit=5),
-                )
-                
-                # Check if a trade action was set
-                if player._pending_trade_action is not None:
-                    trade_action = player._pending_trade_action
-                    player._pending_trade_action = None
-                    session.is_active = False
-                    return trade_action
-                
-            except Exception as e:
-                # Log error but continue negotiation
-                logfire.error(
-                    f"Negotiation error for {current_color}: {e}",
-                    color=current_color.value
-                )
-            
-            # Advance to next speaker
             session.advance_turn()
             
-            # Check if max rounds reached
             if session.current_round >= session.max_rounds:
                 session.is_active = False
-                return None
+                return
             
-            # Check if only initiator remains
             if len(session.participants) <= 1:
                 session.is_active = False
-                return None
+                return
+    
+    def _run_finalization_phase(
+        self, game: Game, session: NegotiationSession
+    ) -> Optional[Action]:
+        """
+        Phase 2: Initiator specifies the final trade offer.
+        
+        One LLM call with the TRADE_FINALIZE_TOOLSET. The initiator reviews
+        the conversation and their resources, then calls finalize_trade to
+        submit the offer (or declines to trade).
+        """
+        from catanatron.players.llm.toolsets import TRADE_FINALIZE_TOOLSET
+        from catanatron.players.llm.base import CatanDependencies
+        
+        initiator = session.initiator
+        player = self.players.get(initiator)
+        if player is None:
+            return None
+        
+        prompt = self._build_finalization_prompt(session)
+        
+        deps = CatanDependencies(
+            color=initiator,
+            game=game,
+            playable_actions=[],
+            strategy_recommendation=None,
+            strategy_reasoning=None,
+            turn_number=game.state.num_turns,
+            is_my_turn=True,
+            negotiation_manager=self,
+            player_instance=player,
+        )
+        
+        player._pending_trade_action = None
+        
+        for attempt in range(MAX_NEGOTIATION_RETRIES):
+            try:
+                player.agent.run_sync(
+                    prompt,
+                    deps=deps,
+                    toolsets=[TRADE_FINALIZE_TOOLSET],
+                    usage_limits=UsageLimits(
+                        tool_calls_limit=FINALIZATION_TOOL_CALLS_LIMIT,
+                    ),
+                )
+                break
+            except UsageLimitExceeded:
+                if logfire is not None:
+                    logfire.error(
+                        f"Trade finalization usage limit for {initiator}",
+                        color=initiator.value,
+                    )
+                break
+            except ModelHTTPError as e:
+                if e.status_code == 503 and attempt < MAX_NEGOTIATION_RETRIES - 1:
+                    if logfire is not None:
+                        logfire.warning(
+                            f"Trade finalization 503 retry {attempt + 1} for {initiator}",
+                            color=initiator.value,
+                        )
+                    time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                elif attempt < MAX_NEGOTIATION_RETRIES - 1:
+                    if logfire is not None:
+                        logfire.warning(
+                            f"Trade finalization HTTP {e.status_code} retry {attempt + 1} for {initiator}",
+                            color=initiator.value,
+                        )
+                    time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                else:
+                    if logfire is not None:
+                        logfire.error(
+                            f"Trade finalization error for {initiator} after {MAX_NEGOTIATION_RETRIES} attempts: {e}",
+                            color=initiator.value,
+                        )
+            except Exception as e:
+                if attempt < MAX_NEGOTIATION_RETRIES - 1:
+                    if logfire is not None:
+                        logfire.warning(
+                            f"Trade finalization retry {attempt + 1} for {initiator}: {e}",
+                            color=initiator.value,
+                        )
+                    time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+                else:
+                    if logfire is not None:
+                        logfire.error(
+                            f"Trade finalization error for {initiator} after {MAX_NEGOTIATION_RETRIES} attempts: {e}",
+                            color=initiator.value,
+                        )
+        
+        if player._pending_trade_action is not None:
+            trade_action = player._pending_trade_action
+            player._pending_trade_action = None
+            return trade_action
         
         return None
     
-    def _build_negotiation_prompt(self, session: NegotiationSession, speaker: Color) -> str:
+    def _build_messaging_prompt(self, session: NegotiationSession, speaker: Color) -> str:
         """
-        Build the prompt for a negotiation turn.
-        
-        Args:
-            session: The current negotiation session
-            speaker: The color of the player who should speak
-            
-        Returns:
-            Prompt string for the agent
+        Build the prompt for a messaging-phase turn.
+
+        Embeds game state inline so the agent can reason without calling
+        analysis tools. The agent should make exactly ONE tool call:
+        send_message or leave_negotiation.
         """
+        import json
+        from catanatron.players.llm.state_formatter import StateFormatter
+
         lines = []
-        
-        lines.append("=== TRADE NEGOTIATION ===")
+
+        lines.append("=== TRADE NEGOTIATION (Messaging Phase) ===")
         lines.append(f"You are {speaker.value} in a trade negotiation.")
         lines.append(f"Initiated by: {session.initiator.value}")
         lines.append(f"Participants: {[c.value for c in session.participants]}")
         lines.append(f"Round: {session.current_round + 1}/{session.max_rounds}")
         lines.append("")
-        
-        # Add conversation history
+
+        # Embed structured game state inline
+        if session.game is not None:
+            game_state = StateFormatter.format_full_state(session.game, speaker)
+            game_state.get("my_state", {}).pop("color", None)
+            game_state_json = json.dumps(game_state, indent=2, default=str)
+            lines.append("=== STRUCTURED_STATE_JSON ===")
+            lines.append(game_state_json)
+            lines.append("=== END_STRUCTURED_STATE_JSON ===")
+            lines.append("")
+
+        # Trade directionality rules
+        lines.append("=== TRADE RULES ===")
+        lines.append(f"Trades can ONLY happen between the initiator ({session.initiator.value}) and another player.")
+        lines.append("Two non-initiator players cannot trade with each other in this negotiation.")
+        if speaker == session.initiator:
+            lines.append("As initiator, you will submit the final trade offer after messaging concludes.")
+        else:
+            lines.append(f"If you want to trade, you must negotiate with {session.initiator.value} — they control the final offer.")
+        lines.append("")
+
+        # Conversation history
         if session.messages:
             lines.append("=== CONVERSATION SO FAR ===")
             lines.append(session.format_history())
@@ -431,25 +616,79 @@ class NegotiationManager:
         else:
             lines.append("This is the start of the negotiation. No messages yet.")
             lines.append("")
-        
-        # Add instructions based on role
+
+        # Turn instructions — heavily emphasize ONE tool call
+        lines.append("=== YOUR TURN ===")
+        lines.append("IMPORTANT: You have exactly ONE tool call this turn. Do NOT call analysis")
+        lines.append("tools — your game state is shown above. Think carefully about what you")
+        lines.append("want to say, then make a single call to one of:")
+        lines.append("")
         if speaker == session.initiator:
-            lines.append("=== YOUR TURN (INITIATOR) ===")
-            lines.append("You initiated this negotiation. You can:")
-            lines.append("1. Send a message to discuss the trade")
-            lines.append("2. Make a formal trade offer (this ends the negotiation)")
-            lines.append("")
-            lines.append("Use get_game_and_action_analysis if you need to review your resources,")
-            lines.append("then send_message to propose trades or trade_offer to make a formal offer.")
+            lines.append("  - send_message: Send ONE message discussing what you want to trade.")
+            lines.append("    After all rounds, you will specify the final trade offer separately.")
+            lines.append("  - leave_negotiation: Use this if another player has already accepted")
+            lines.append("    your terms and there is nothing more to discuss. Leaving ends the")
+            lines.append("    messaging phase and takes you directly to finalization.")
         else:
-            lines.append("=== YOUR TURN ===")
-            lines.append("You can:")
-            lines.append("1. Send a message to respond or make counter-proposals")
-            lines.append("2. Leave the negotiation if you're not interested")
+            lines.append("  - send_message: Send ONE message responding to the discussion.")
+            lines.append("  - leave_negotiation: Exit if you are not interested in trading, OR")
+            lines.append("    if you have verbally agreed to a trade in a previous message.")
+            lines.append("    IMPORTANT: Once you say 'yes', 'deal', 'agreed', or otherwise accept")
+            lines.append("    a trade offer in a message, your NEXT turn MUST be leave_negotiation.")
+            lines.append("    Do not keep chatting after accepting — leave immediately so the")
+            lines.append("    initiator can finalize the offer.")
+        lines.append("")
+        lines.append("Do NOT call send_message more than once. The game state is already provided above.")
+
+        return "\n".join(lines)
+    
+    def _build_finalization_prompt(self, session: NegotiationSession) -> str:
+        """
+        Build the prompt for the finalization phase (initiator only).
+
+        The initiator reviews the full conversation and their resources,
+        then uses finalize_trade to submit the final offer.
+        """
+        import json
+        from catanatron.players.llm.state_formatter import StateFormatter
+
+        lines = []
+
+        lines.append("=== TRADE FINALIZATION ===")
+        lines.append(f"You are {session.initiator.value}. The negotiation messaging has concluded.")
+        lines.append(f"Participants: {[c.value for c in session.participants]}")
+        lines.append("")
+
+        # Embed structured game state for the initiator
+        if session.game is not None:
+            game_state = StateFormatter.format_full_state(session.game, session.initiator)
+            game_state.get("my_state", {}).pop("color", None)
+            game_state_json = json.dumps(game_state, indent=2, default=str)
+            lines.append("=== STRUCTURED_STATE_JSON ===")
+            lines.append(game_state_json)
+            lines.append("=== END_STRUCTURED_STATE_JSON ===")
             lines.append("")
-            lines.append("Use get_game_and_action_analysis if you need to review your resources,")
-            lines.append("then send_message to respond or leave_negotiation to exit.")
-        
+
+        # Trade directionality
+        lines.append("=== TRADE RULES ===")
+        lines.append("Your trade offer will be between YOU and ONE other player.")
+        lines.append("You cannot create a trade between two other players.")
+        lines.append("")
+
+        if session.messages:
+            lines.append("=== FULL NEGOTIATION HISTORY ===")
+            lines.append(session.format_history())
+            lines.append("")
+        else:
+            lines.append("No messages were exchanged during negotiation.")
+            lines.append("")
+
+        lines.append("=== YOUR TASK ===")
+        lines.append("Based on the negotiation and your resources above, decide on your trade offer.")
+        lines.append("Use finalize_trade to submit your offer, or decline if no good deal emerged.")
+        lines.append("")
+        lines.append("Specify: offer=[wood, brick, sheep, wheat, ore], ask=[wood, brick, sheep, wheat, ore]")
+
         return "\n".join(lines)
     
     def add_message(self, sender: Color, content: str) -> None:

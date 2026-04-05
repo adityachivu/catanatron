@@ -28,7 +28,10 @@ from catanatron.state_functions import player_has_rolled
 
 import json
 
-import logfire
+try:
+    import logfire
+except ImportError:
+    logfire = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from catanatron.players.llm.negotiation import NegotiationManager, NegotiationMessage
@@ -78,10 +81,11 @@ CATAN_SYSTEM_PROMPT = """You are an expert Settlers of Catan player. Your goal i
 
 ## Decision Making
 The full game state, legal actions, and strategy hints are provided in the user message each turn. Read them carefully before deciding.
-You may optionally use the `get_game_and_action_analysis` tool to refresh or re-examine the state if needed, but it is not required.
-Use the available tools to perform deeper analysis when helpful. `initiate_negotiation` tool is available only when legal and must be used before using `trade_offer` tool.
+Use the available tools when helpful.
+When `initiate_negotiation` is available, prefer domestic trade over maritime trade.
+You can only negotiate once per turn; once the negotiation concludes no further trading is allowed that turn.
 Consider both immediate gains and long-term strategy.
-Pay attention to the negotiation history and performance of the other players. Consider using domestic trade offers in place of maritime trade offers when possible.
+Pay attention to the negotiation history and performance of the other players.
 If a strategy advisor recommendation is provided, take it into consideration but make the final decision based on your analysis.
 
 Always return a valid action from the available options."""
@@ -91,16 +95,15 @@ class BaseLLMPlayer(Player):
     """
     Base class for LLM-powered players.
 
-    This class can be combined with strategy players via multiple inheritance
-    to use their decide() method as a recommendation source.
+    Optionally accepts a strategy_advisor (a Player instance like AlphaBetaPlayer)
+    whose decide() method is called to provide a recommendation to the LLM.
 
     Example:
-        class LLMAlphaBetaPlayer(BaseLLMPlayer, AlphaBetaPlayer):
-            pass
+        from catanatron.players.minimax import AlphaBetaPlayer
 
-    The LLM will receive the AlphaBetaPlayer's recommendation as context
-    but can choose to follow it or make a different decision.
-    
+        advisor = AlphaBetaPlayer(Color.RED, depth=3)
+        player = BaseLLMPlayer(Color.RED, model="...", strategy_advisor=advisor)
+
     Negotiation Support:
         Players can participate in pre-trade negotiations with other LLM players.
         Use setup_negotiation(game) before game.play() to enable this feature.
@@ -117,14 +120,13 @@ class BaseLLMPlayer(Player):
         self,
         color: Color,
         model: ModelInput = None,
+        strategy_advisor: Optional[Player] = None,
         output_mode: Literal["index", "structured"] = "index",
         timeout: Optional[float] = 120.0,
         tool_calls_limit: int = 10,
         is_bot: bool = True,
-        # Model settings (applied at run time)
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = 1024,
-        **strategy_kwargs,
     ):
         """
         Initialize the LLM player.
@@ -136,21 +138,17 @@ class BaseLLMPlayer(Player):
                 - Model: Pre-configured Model instance (including TestModel, FunctionModel)
                 - ModelConfig: Configuration dataclass with model name and settings
                 - None: Use CATAN_LLM_MODEL env var or default
+            strategy_advisor: Optional Player instance (e.g., AlphaBetaPlayer) whose
+                decide() is called to provide a recommendation to the LLM.
             output_mode: "index" for fast mode, "structured" for detailed action types
             timeout: Timeout in seconds for LLM calls (default: 120.0)
             tool_calls_limit: Overall tool call limit per decision (default: 10)
             is_bot: Whether this is a bot player (default: True)
             temperature: Sampling temperature for the model (0.0-1.0+)
             max_tokens: Maximum tokens to generate
-            **strategy_kwargs: Arguments passed to parent strategy player (e.g., depth for AlphaBeta)
         """
-        # Initialize parent player(s)
-        # Note: is_bot is handled explicitly here to avoid passing it through
-        # strategy_kwargs to strategy players that don't accept it
-        super().__init__(color, **strategy_kwargs)
-        
-        # Set is_bot after parent chain init (Player sets it, strategy players may not)
-        self.is_bot = is_bot
+        super().__init__(color, is_bot)
+        self.strategy_advisor = strategy_advisor
 
         # Create model using factory - handles str, Model, ModelConfig, None
         self._model = create_model(model)
@@ -171,6 +169,10 @@ class BaseLLMPlayer(Player):
         self._pending_trade_action: Optional[Action] = None
         self._pending_negotiation_request: bool = False
         self._last_negotiation_turn: int = -1
+
+        # Logfire player_turn span (persists across decide() calls within a turn)
+        self._turn_span_cm: Any = None
+        self._turn_span_turn: int = -1
 
         # Create the agent - defer to allow subclasses to customize
         self.agent = self._create_agent()
@@ -196,10 +198,11 @@ class BaseLLMPlayer(Player):
         """
         # Use index-based output for simplicity and reliability
         agent = Agent(
-            self._model,  # Can be string or Model instance
+            self._model,
             deps_type=CatanDependencies,
             output_type=ActionByIndex,
             system_prompt=CATAN_SYSTEM_PROMPT,
+            retries=3,
         )
 
         return agent
@@ -271,9 +274,9 @@ class BaseLLMPlayer(Player):
     
     def _can_trade(self, game: Game) -> bool:
         """
-        Check if trade tools should be available.
+        Check if the initiate_negotiation tool should be available.
         
-        Trade tools are available when:
+        Negotiation (the only path to domestic trade) is available when:
         - Current prompt is PLAY_TURN
         - Player has rolled the dice
         - It's this player's turn
@@ -283,7 +286,7 @@ class BaseLLMPlayer(Player):
             game: Current game instance
             
         Returns:
-            True if trade tools should be available
+            True if negotiation initiation should be available
         """
         state = game.state
         
@@ -348,30 +351,21 @@ class BaseLLMPlayer(Player):
         self, game: Game, playable_actions: List[Action]
     ) -> tuple[Optional[Action], Optional[str]]:
         """
-        Get recommendation from parent strategy player.
-
-        This method traverses the MRO to find a parent class with a decide()
-        method (other than BaseLLMPlayer and Player base class).
+        Get recommendation from the strategy advisor.
 
         Returns:
             Tuple of (recommended_action, reasoning_string)
         """
-        for cls in type(self).__mro__:
-            # Skip this class and the base Player class
-            if cls is BaseLLMPlayer or cls is Player:
-                continue
-
-            # Check if this is a Player subclass with its own decide method
-            if issubclass(cls, Player) and "decide" in cls.__dict__:
-                try:
-                    recommendation = cls.decide(self, game, playable_actions)
-                    reasoning = self._explain_recommendation(recommendation, game, cls)
-                    return recommendation, reasoning
-                except Exception as e:
-                    # If strategy player fails, continue without recommendation
-                    return None, f"Strategy advisor failed: {e}"
-
-        return None, None
+        if self.strategy_advisor is None:
+            return None, None
+        try:
+            recommendation = self.strategy_advisor.decide(game, playable_actions)
+            reasoning = self._explain_recommendation(
+                recommendation, game, type(self.strategy_advisor)
+            )
+            return recommendation, reasoning
+        except Exception as e:
+            return None, f"Strategy advisor failed: {e}"
 
     def _explain_recommendation(
         self, recommendation: Action, game: Game, strategy_cls: type
@@ -496,12 +490,15 @@ class BaseLLMPlayer(Player):
 
         return "\n".join(parts)
 
-    def _is_roll_or_end_turn(self, playable_actions: List[Action]) -> bool:
-        """Check if the only possible action is either roll or end turn."""
-        return len(playable_actions) == 1 and (
-            playable_actions[0].action_type == ActionType.ROLL or
-            playable_actions[0].action_type == ActionType.END_TURN or
-            playable_actions[0].action_type == ActionType.DISCARD
+    def _is_auto_play_action(self, playable_actions: List[Action]) -> bool:
+        """Check if there's only one forced action that doesn't need LLM reasoning."""
+        if len(playable_actions) != 1:
+            return False
+        action_type = playable_actions[0].action_type
+        return action_type in (
+            ActionType.ROLL,
+            ActionType.END_TURN,
+            ActionType.DISCARD,
         )
 
     def _resolve_action(
@@ -528,16 +525,85 @@ class BaseLLMPlayer(Player):
         # Would need to match against playable_actions
         return playable_actions[0]
 
+    def _open_turn_span(self, current_turn: int, state) -> None:
+        """Open a player_turn span for this player's game turn."""
+        if logfire is None or self._turn_span_cm is not None:
+            return
+        self._turn_span_cm = logfire.span(
+            f"catanatron.player_turn [{self.color.value}]",
+            player_color=self.color.value,
+            turn_number=current_turn,
+            phase=state.current_prompt.value,
+        )
+        self._turn_span_cm.__enter__()
+        self._turn_span_turn = current_turn
+
+    def _close_turn_span(self) -> None:
+        """Close the current player_turn span if one is open."""
+        if self._turn_span_cm is not None:
+            self._turn_span_cm.__exit__(None, None, None)
+            self._turn_span_cm = None
+            self._turn_span_turn = -1
+
     def decide(self, game: Game, playable_actions: List[Action]) -> Action:
         """
         Make a decision using the LLM agent.
 
         This is the main entry point called by the game engine.
+        The player_turn span opens on the first ROLL of this player's
+        game turn and closes when any code path returns END_TURN.
         """
-        # 0. Checkif the only possible action is either roll or end turn, return it immediately
-        if self._is_roll_or_end_turn(playable_actions):
+        state = game.state
+        current_turn = state.num_turns
+        is_my_turn = state.current_turn_index == state.color_to_index[self.color]
+
+        # Open span on first decide() of this player's game turn.
+        # Only for real turns (ROLL in playable actions), not initial placement.
+        has_roll = any(a.action_type == ActionType.ROLL for a in playable_actions)
+        if is_my_turn and has_roll and self._turn_span_turn != current_turn:
+            self._close_turn_span()
+            self._open_turn_span(current_turn, state)
+
+        action = self._decide_core(game, playable_actions, state, current_turn, is_my_turn)
+
+        # Close span when the turn ends — single exit point guarantees
+        # no code path can skip this check.
+        if action.action_type == ActionType.END_TURN:
+            self._close_turn_span()
+
+        return action
+
+    def _decide_core(
+        self,
+        game: Game,
+        playable_actions: List[Action],
+        state,
+        current_turn: int,
+        is_my_turn: bool,
+    ) -> Action:
+        """Core decision logic. All code paths return an Action."""
+        # 0a. Workaround for game engine bug: auto-reject if asked to decide
+        # on our own trade offer (engine may route DECIDE_TRADE to the offerer
+        # when the offerer isn't at seat index 0).
+        if state.current_prompt == ActionPrompt.DECIDE_TRADE:
+            offerer_index = state.current_trade[10]
+            if state.color_to_index.get(self.color) == offerer_index:
+                action = Action(self.color, ActionType.REJECT_TRADE, state.current_trade)
+                if logfire is not None:
+                    logfire.info(
+                        f"LLM player {self.color} auto-rejected own trade offer",
+                        turn_number=current_turn,
+                    )
+                return action
+
+        # 0b. Auto-play forced single actions (ROLL, END_TURN, DISCARD)
+        if self._is_auto_play_action(playable_actions):
             action = playable_actions[0]
-            logfire.info(f"LLM player {self.color} chose action {action.action_type}", turn_number=game.state.num_turns)
+            if logfire is not None:
+                logfire.info(
+                    f"LLM player {self.color} chose action {action.action_type}",
+                    turn_number=current_turn,
+                )
             return action
 
         # 1. Get strategy recommendation from parent (if any)
@@ -546,18 +612,16 @@ class BaseLLMPlayer(Player):
         )
 
         # 2. Check for turn boundary, manage history
-        current_turn = game.state.num_turns
         if self.history_manager.is_new_turn(current_turn):
             self.history_manager.clear()
             self.history_manager.set_turn(current_turn)
-            # Clear negotiation history on new turn
             self.clear_negotiation_history()
 
-        # 3. Clear any pending trade action and negotiation request from previous runs
+        # 3. Clear pending flags from previous runs
         self._pending_trade_action = None
         self._pending_negotiation_request = False
 
-        # 4. Build dependencies with negotiation support
+        # 4. Build dependencies
         deps = CatanDependencies(
             color=self.color,
             game=game,
@@ -565,8 +629,7 @@ class BaseLLMPlayer(Player):
             strategy_recommendation=recommendation,
             strategy_reasoning=reasoning,
             turn_number=current_turn,
-            is_my_turn=game.state.current_turn_index
-            == game.state.color_to_index[self.color],
+            is_my_turn=is_my_turn,
             negotiation_manager=self.negotiation_manager,
             player_instance=self,
         )
@@ -574,11 +637,10 @@ class BaseLLMPlayer(Player):
         # 5. Select appropriate toolsets based on game state
         toolsets = self._select_toolsets(game)
 
-        # 6. Run agent with history, toolsets, and model settings
+        # 6. Run agent
         try:
-            # Get model settings (temperature, max_tokens, timeout, etc.)
             model_settings = self._get_model_settings()
-            
+
             result = self.agent.run_sync(
                 self._build_prompt(game, playable_actions, recommendation, reasoning),
                 deps=deps,
@@ -593,25 +655,24 @@ class BaseLLMPlayer(Player):
             # 7. Update history
             self.history_manager.update(result.all_messages())
 
-            # 8. Check if negotiation was requested (BEFORE checking trade action)
-            # This runs AFTER run_sync() completes, avoiding nested event loops
+            # 8. Handle negotiation request (runs AFTER run_sync to avoid nesting)
             if self._pending_negotiation_request and self.negotiation_manager is not None:
                 self._pending_negotiation_request = False
-                
-                # Run negotiation loop OUTSIDE of run_sync() - no nested calls!
+
                 neg_result = self.negotiation_manager.start_negotiation(self.color, game)
                 trade_action = neg_result.get("trade_action")
-                
+
                 if trade_action is not None:
-                    logfire.info(
-                        f"LLM player {self.color} made trade offer after negotiation",
-                        turn_number=current_turn,
-                        action_type=trade_action.action_type.value
-                    )
+                    if logfire is not None:
+                        logfire.info(
+                            f"LLM player {self.color} made trade offer",
+                            turn_number=current_turn,
+                            action_type=trade_action.action_type.value,
+                        )
                     return trade_action
-                
-                # Negotiation ended without trade - re-run agent to continue turn
-                # (with updated negotiation history in context)
+
+                # Negotiation ended without trade -- re-run agent to continue turn
+                # (trade tools are now disabled since initiated_this_turn is set)
                 result = self.agent.run_sync(
                     self._build_prompt(game, playable_actions, recommendation, reasoning),
                     deps=deps,
@@ -623,52 +684,43 @@ class BaseLLMPlayer(Player):
                     model_settings=model_settings,
                 )
                 self.history_manager.update(result.all_messages())
-                
-                # Check for trade action (in case they made one after negotiation)
-                if self._pending_trade_action is not None:
-                    action = self._pending_trade_action
-                    self._pending_trade_action = None
-                    logfire.info(
-                        f"LLM player {self.color} made trade offer after negotiation",
-                        turn_number=current_turn,
-                        action_type=action.action_type.value
-                    )
-                    return action
-                
+
                 action = self._resolve_action(result.output, playable_actions)
-                logfire.info(
-                    f"LLM player {self.color} chose action {action.action_type} after negotiation",
-                    turn_number=current_turn
-                )
+                if logfire is not None:
+                    logfire.info(
+                        f"LLM player {self.color} chose action {action.action_type} after negotiation",
+                        turn_number=current_turn,
+                    )
                 return action
 
-            # 9. Check if a trade action was set by a tool
-            if self._pending_trade_action is not None:
-                action = self._pending_trade_action
-                self._pending_trade_action = None
-                logfire.info(
-                    f"LLM player {self.color} made trade offer",
-                    turn_number=current_turn,
-                    action_type=action.action_type.value
-                )
-                return action
-
-            # 10. Map output to Action
+            # 9. Map output to Action (trade offers only come through negotiation now)
             action = self._resolve_action(result.output, playable_actions)
-            logfire.info(f"LLM player {self.color} chose action {action.action_type}", turn_number=current_turn)
+
+            log_kwargs: dict = {"turn_number": current_turn}
+            if state.current_prompt == ActionPrompt.DECIDE_TRADE:
+                log_kwargs["trade_offer_from"] = state.colors[state.current_trade[10]].value
+                log_kwargs["decision"] = action.action_type.value
+            if logfire is not None:
+                logfire.info(
+                    f"LLM player {self.color} chose action {action.action_type}",
+                    **log_kwargs,
+                )
             return action
 
         except TimeoutError as e:
-            # Timeout occurred - fall back to strategy recommendation
-            logfire.warning(
-                f"LLM player {self.color} timed out after {self.timeout}s",
-                turn_number=current_turn,
-                error=str(e)
-            )
+            if logfire is not None:
+                logfire.warning(
+                    f"LLM player {self.color} timed out after {self.timeout}s",
+                    turn_number=current_turn,
+                    error=str(e),
+                )
         except Exception as e:
-            # On any other error (including UsageLimitExceeded), fall back to strategy recommendation or first action
-            logfire.error(f"LLM player {self.color} error: {e}", turn_number=current_turn)
-        
+            if logfire is not None:
+                logfire.error(
+                    f"LLM player {self.color} error: {e}",
+                    turn_number=current_turn,
+                )
+
         # Fallback for exception cases
         if recommendation is not None:
             return recommendation
@@ -677,6 +729,9 @@ class BaseLLMPlayer(Player):
     def reset_state(self):
         """Reset state between games."""
         super().reset_state()
+        if self.strategy_advisor is not None:
+            self.strategy_advisor.reset_state()
+        self._close_turn_span()
         self.history_manager.clear()
         self.clear_negotiation_history()
         self._pending_trade_action = None
@@ -697,6 +752,7 @@ class BaseLLMPlayer(Player):
         state.pop('negotiation_manager', None)
         state.pop('negotiation_history', None)
         state.pop('_pending_trade_action', None)
+        state.pop('_turn_span_cm', None)
         # Model instances (TestModel, FunctionModel) may not be pickleable
         # Store only if it's a string
         if not isinstance(state.get('_model'), str):
@@ -722,3 +778,5 @@ class BaseLLMPlayer(Player):
         self._pending_trade_action = None
         self._pending_negotiation_request = False
         self._last_negotiation_turn = -1
+        self._turn_span_cm = None
+        self._turn_span_turn = -1
