@@ -369,6 +369,74 @@ class TestLLMAlphaBetaPlayer:
             assert "LLM" in repr_str
             assert "AlphaBeta" in repr_str
 
+    def test_top_k_recommendations_are_distinct(self):
+        """Advisors like AlphaBetaPlayer read game.playable_actions directly.
+        _get_top_k_recommendations must pass a game copy with a restricted action list
+        each iteration so the advisor sees a shrinking candidate set without mutating
+        the live game, and returns distinct actions.
+        """
+        from catanatron.players.llm.base import BaseLLMPlayer, _TRIVIAL_ACTION_TYPES
+
+        actions = [
+            Action(Color.RED, ActionType.BUILD_SETTLEMENT, i) for i in range(5)
+        ]
+
+        # Advisor that always picks game.playable_actions[0] (mirrors AlphaBetaPlayer)
+        class GreedyFirstAdvisor:
+            def decide(self, game, playable_actions):
+                return game.playable_actions[0]
+
+        with patch("catanatron.players.llm.base.Agent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            player = BaseLLMPlayer.__new__(BaseLLMPlayer)
+            player.strategy_advisor = GreedyFirstAdvisor()
+            player.top_k = 3
+            player.color = Color.RED
+
+            game = MagicMock()
+            game.playable_actions = actions
+
+            recs = player._get_top_k_recommendations(game, actions)
+
+            # Original game must never be mutated
+            assert game.playable_actions == actions
+            # Should return exactly top_k distinct actions
+            assert len(recs) == 3
+            rec_actions = [r[0] for r in recs]
+            assert len(set(rec_actions)) == 3, "All top-k recommendations must be distinct"
+            assert rec_actions[0] == actions[0]
+            assert rec_actions[1] == actions[1]
+            assert rec_actions[2] == actions[2]
+
+    def test_top_k_falls_back_to_single_when_few_actions(self):
+        """When interesting actions <= top_k, returns a single recommendation."""
+        from catanatron.players.llm.base import BaseLLMPlayer
+
+        # Only 2 interesting actions (below default top_k=3)
+        actions = [
+            Action(Color.RED, ActionType.BUILD_SETTLEMENT, 1),
+            Action(Color.RED, ActionType.BUILD_SETTLEMENT, 2),
+            Action(Color.RED, ActionType.END_TURN, None),
+        ]
+
+        advisor = MagicMock()
+        advisor.decide.return_value = actions[0]
+
+        with patch("catanatron.players.llm.base.Agent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            player = BaseLLMPlayer.__new__(BaseLLMPlayer)
+            player.strategy_advisor = advisor
+            player.top_k = 3
+            player.color = Color.RED
+
+            game = MagicMock()
+            game.playable_actions = actions
+
+            recs = player._get_top_k_recommendations(game, actions)
+
+            assert len(recs) == 1
+            assert recs[0][0] == actions[0]
+
 
 class TestLLMMCTSPlayer:
     """Tests for LLMMCTSPlayer."""
