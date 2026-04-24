@@ -804,20 +804,53 @@ class TestNegotiationWithTestModel:
     def test_negotiation_message(self):
         """Test NegotiationMessage creation."""
         from catanatron.players.llm.negotiation import NegotiationMessage
-        
+
         msg = NegotiationMessage(
             sender=Color.RED,
             content="I need wheat!"
         )
-        
+
         assert msg.sender == Color.RED
         assert msg.content == "I need wheat!"
         assert msg.timestamp > 0
-        
+
         # Test to_dict
         d = msg.to_dict()
         assert d["sender"] == "RED"
         assert d["content"] == "I need wheat!"
+
+    def test_leaver_still_receives_chat_history(self):
+        """Players who leave mid-session must still receive the transcript,
+        so the DECIDE_TRADE prompt can remind them of any verbal agreement."""
+        from catanatron.players.llm.negotiation import (
+            NegotiationManager,
+            NegotiationSession,
+        )
+        from catanatron.players.llm_player import PydanticAIPlayer
+
+        initiator = PydanticAIPlayer(Color.RED, model=TestModel())
+        leaver = PydanticAIPlayer(Color.BLUE, model=TestModel())
+
+        manager = NegotiationManager(max_rounds=3)
+        manager.register_player(initiator)
+        manager.register_player(leaver)
+
+        session = NegotiationSession(
+            initiator=Color.RED,
+            participants=[Color.RED, Color.BLUE],
+        )
+        session.add_message(Color.RED, "2 wood for 1 wheat?")
+        session.add_message(Color.BLUE, "deal")
+        manager.current_session = session
+
+        assert session.remove_participant(Color.BLUE) is True
+        assert Color.BLUE not in session.participants
+        assert Color.BLUE in session.original_participants
+
+        manager._end_negotiation()
+
+        assert len(leaver.negotiation_history) == 2
+        assert leaver.negotiation_history[1].content == "deal"
 
 
 # ============= Toolset Tests =============
