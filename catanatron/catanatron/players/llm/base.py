@@ -27,11 +27,14 @@ from catanatron.players.llm.state_formatter import StateFormatter
 from catanatron.state_functions import player_has_rolled
 
 import json
+import random
 
 try:
     import logfire
 except ImportError:
     logfire = None  # type: ignore[assignment]
+
+_TRIVIAL_ACTION_TYPES = frozenset({ActionType.ROLL, ActionType.END_TURN, ActionType.DISCARD})
 
 if TYPE_CHECKING:
     from catanatron.players.llm.negotiation import NegotiationManager, NegotiationMessage
@@ -121,6 +124,7 @@ class BaseLLMPlayer(Player):
         color: Color,
         model: ModelInput = None,
         strategy_advisor: Optional[Player] = None,
+        top_k: int = 3,
         output_mode: Literal["index", "structured"] = "index",
         timeout: Optional[float] = 120.0,
         tool_calls_limit: int = 10,
@@ -149,6 +153,7 @@ class BaseLLMPlayer(Player):
         """
         super().__init__(color, is_bot)
         self.strategy_advisor = strategy_advisor
+        self.top_k = top_k
 
         # Create model using factory - handles str, Model, ModelConfig, None
         self._model = create_model(model)
@@ -367,6 +372,50 @@ class BaseLLMPlayer(Player):
         except Exception as e:
             return None, f"Strategy advisor failed: {e}"
 
+    def _get_top_k_recommendations(
+        self, game: Game, playable_actions: List[Action]
+    ) -> List[tuple]:
+        """
+        Get top-k recommendations from the strategy advisor by iterative removal.
+
+        Returns a list of (action, reasoning) tuples.
+        Falls back to a single recommendation when there aren't enough interesting actions.
+        """
+        if self.strategy_advisor is None:
+            return []
+
+        interesting = [
+            a for a in playable_actions
+            if a.action_type not in _TRIVIAL_ACTION_TYPES
+        ]
+
+        # Not enough interesting moves to warrant top-k; single rec suffices
+        if len(interesting) <= self.top_k:
+            rec, reasoning = self._get_strategy_recommendation(game, playable_actions)
+            return [(rec, reasoning)] if rec is not None else []
+
+        # Iteratively extract top-k using game copies so the live game is never mutated.
+        # Strategy advisors like AlphaBetaPlayer read game.playable_actions directly
+        # and ignore the passed list, so each copy gets a restricted candidate set.
+        recommendations: List[tuple] = []
+        temp_actions = list(interesting)
+        for _ in range(self.top_k):
+            if not temp_actions:
+                break
+            try:
+                game_copy = game.copy()
+                game_copy.playable_actions = temp_actions
+                rec = self.strategy_advisor.decide(game_copy, temp_actions)
+                reasoning = self._explain_recommendation(
+                    rec, game, type(self.strategy_advisor)
+                )
+                recommendations.append((rec, reasoning))
+                temp_actions = [a for a in temp_actions if a != rec]
+            except Exception:
+                break
+
+        return recommendations
+
     def _explain_recommendation(
         self, recommendation: Action, game: Game, strategy_cls: type
     ) -> str:
@@ -397,8 +446,7 @@ class BaseLLMPlayer(Player):
         self,
         game: Game,
         playable_actions: Optional[List[Action]] = None,
-        strategy_recommendation: Optional[Action] = None,
-        strategy_reasoning: Optional[str] = None,
+        strategy_recommendations: Optional[List[tuple]] = None,
     ) -> str:
         """Build the user prompt with inline game state, actions, and strategy.
 
@@ -406,7 +454,7 @@ class BaseLLMPlayer(Player):
         1. Human-readable header
         2. Compact JSON observation (STRUCTURED_STATE_JSON)
         3. Legal / playable actions (PLAYABLE_ACTIONS)
-        4. Strategy hint from the advisor model (STRATEGY_HINT) — omitted when absent
+        4. Strategy hints from the advisor model (STRATEGY_HINTS) — omitted when absent
         5. Reasoning + output-format instructions
         """
         state = game.state
@@ -465,17 +513,30 @@ class BaseLLMPlayer(Player):
             parts.append("=== END_PLAYABLE_ACTIONS ===")
             parts.append("")  # blank line separator
 
-        # ── 4. Strategy hint (only when present) ───────────────────────
-        if strategy_recommendation is not None:
-            rec_desc = StateFormatter.format_action(strategy_recommendation, -1)
-            parts.append("=== STRATEGY_HINT ===")
-            parts.append("Baseline strategy model suggests:")
-            parts.append(f"- Recommended action: {rec_desc.get('description', str(strategy_recommendation))}")
-            parts.append(f"- Reasoning: {strategy_reasoning or 'No detailed reasoning available'}")
+        # ── 4. Strategy hints (only when present) ──────────────────────
+        if strategy_recommendations:
+            parts.append("=== STRATEGY_HINTS ===")
+            if len(strategy_recommendations) == 1:
+                rec, reasoning = strategy_recommendations[0]
+                rec_desc = StateFormatter.format_action(rec, -1)
+                parts.append("Baseline strategy model suggests:")
+                parts.append(f"- Recommended action: {rec_desc.get('description', str(rec))}")
+                parts.append(f"- Reasoning: {reasoning or 'No detailed reasoning available'}")
+            else:
+                parts.append(
+                    f"The strategy model identified {len(strategy_recommendations)} candidate actions (order is random, not ranked):"
+                )
+                shuffled = list(strategy_recommendations)
+                random.shuffle(shuffled)
+                for rec, reasoning in shuffled:
+                    rec_desc = StateFormatter.format_action(rec, -1)
+                    parts.append(
+                        f"- {rec_desc.get('description', str(rec))} — {reasoning or 'No reasoning'}"
+                    )
             parts.append(
-                "You may follow or ignore this suggestion, but you must still pick one of the PLAYABLE_ACTIONS."
+                "Reason through these options and pick the best one from PLAYABLE_ACTIONS."
             )
-            parts.append("=== END_STRATEGY_HINT ===")
+            parts.append("=== END_STRATEGY_HINTS ===")
             parts.append("")  # blank line separator
 
         # ── 5. Reasoning + output instructions ─────────────────────────
@@ -606,10 +667,10 @@ class BaseLLMPlayer(Player):
                 )
             return action
 
-        # 1. Get strategy recommendation from parent (if any)
-        recommendation, reasoning = self._get_strategy_recommendation(
-            game, playable_actions
-        )
+        # 1. Get top-k strategy recommendations (if advisor present)
+        recommendations = self._get_top_k_recommendations(game, playable_actions)
+        recommendation = recommendations[0][0] if recommendations else None
+        reasoning = recommendations[0][1] if recommendations else None
 
         # 2. Check for turn boundary, manage history
         if self.history_manager.is_new_turn(current_turn):
@@ -642,7 +703,7 @@ class BaseLLMPlayer(Player):
             model_settings = self._get_model_settings()
 
             result = self.agent.run_sync(
-                self._build_prompt(game, playable_actions, recommendation, reasoning),
+                self._build_prompt(game, playable_actions, recommendations),
                 deps=deps,
                 message_history=self.history_manager.get_messages(),
                 toolsets=toolsets,
