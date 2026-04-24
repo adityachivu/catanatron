@@ -31,6 +31,38 @@ Adding new scenarios
 1. Write a `setup_*()` function that returns a fully-configured `Game`.
 2. Create an `UnderstandingScenario(...)` instance with the fields below.
 3. Append it to `SCENARIOS`.
+
+How prompts are constructed (mirrors BaseLLMPlayer._build_prompt in players/llm/base.py)
+-----------------------------------------------------------------------------------------
+run_scenario() builds the user message in three sections:
+
+  Section 1 — Header  (turn / phase / color / trade context)
+  Section 2 — STRUCTURED_STATE_JSON  (identical format to the live agent)
+  Section 3 — QUESTION  (understanding-test-specific; no equivalent in live game)
+
+The system prompt comes from `UnderstandingScenario.system_prompt`.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  WHERE TO CUSTOMIZE PROMPTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  A) To change the SYSTEM PROMPT for a single scenario:
+       Edit the `system_prompt` field of the UnderstandingScenario instance.
+       Look for the comment  # ◀ PROMPT: system_prompt  below each scenario.
+
+  B) To change the QUESTION for a single scenario:
+       Edit the `question` field of the UnderstandingScenario instance.
+       Look for the comment  # ◀ PROMPT: question  below each scenario.
+
+  C) To change the SHARED SYSTEM PROMPT used by the live game agent:
+       Edit CATAN_SYSTEM_PROMPT in players/llm/base.py.
+       Import it here and pass it as `system_prompt` in run_scenario() if
+       you want the understanding test to use it too.
+
+  D) To change HOW THE STATE IS PRESENTED (prompt format / section order):
+       Edit the  # ── PROMPT CUSTOMIZATION ──  block inside run_scenario().
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 from __future__ import annotations
@@ -67,6 +99,7 @@ from catanatron.state_functions import (
     get_actual_victory_points,
 )
 
+from catanatron.players.llm.base import CATAN_SYSTEM_PROMPT
 from catanatron.players.llm.models import ModelInput, create_model
 from catanatron.players.llm.state_formatter import StateFormatter
 
@@ -98,10 +131,12 @@ class UnderstandingScenario:
         Must be reproducible (use fixed seeds / explicit actions).
     perspective_color:
         The player colour from whose perspective the state is formatted.
-    system_prompt:
-        Task-specific instruction to the agent (replaces `CATAN_SYSTEM_PROMPT`).
-    question:
-        The free-form question asked after presenting the game state.
+    system_prompt:   ◀◀◀ PROMPT FIELD — edit to change the agent's instruction/role
+        Task-specific instruction to the agent.
+        Replaces CATAN_SYSTEM_PROMPT from base.py for this test.
+        See run_scenario() to swap in CATAN_SYSTEM_PROMPT globally.
+    question:        ◀◀◀ PROMPT FIELD — edit to change what is asked
+        The free-form question appended after the STRUCTURED_STATE_JSON block.
     """
 
     name: str
@@ -109,8 +144,8 @@ class UnderstandingScenario:
     description: str
     setup: Callable[[], Game]
     perspective_color: Color
-    system_prompt: str
-    question: str
+    system_prompt: str   # ◀ PROMPT A: the agent's role / instructions
+    question: str        # ◀ PROMPT B: what you ask the agent about the state
 
 
 # ---------------------------------------------------------------------------
@@ -1323,32 +1358,76 @@ def run_scenario(scenario: UnderstandingScenario, model: ModelInput = None) -> s
     """
     Execute a single understanding scenario and return the agent's answer.
 
-    Mirrors the agent-call style used in BaseLLMPlayer (base.py).
+    The user message is built to match BaseLLMPlayer._build_prompt() in
+    players/llm/base.py — same section markers, same state JSON, same header.
+    Sections 3-5 of _build_prompt (playable actions, strategy hints, output
+    requirements) are omitted because this is a free-text comprehension test.
+    Instead, a QUESTION section is appended.
+
     No tools are registered — this tests pure reasoning from the state JSON.
+
+    ─── WHERE TO CHANGE PROMPTS ────────────────────────────────────────────
+    System prompt  → scenario.system_prompt  (per-scenario, see each SCENARIO_* block)
+                     or swap for CATAN_SYSTEM_PROMPT to use the live-game prompt
+    Question       → scenario.question       (per-scenario, see each SCENARIO_* block)
+    State format   → the  # ── PROMPT CUSTOMIZATION ──  block below
+    ────────────────────────────────────────────────────────────────────────
     """
     game = scenario.setup()
+    state = game.state
+    parts: list[str] = []
 
-    # Format state identically to how the live player does it (base.py)
-    state_dict = StateFormatter.format_full_state(game, scenario.perspective_color)
-    state_json = json.dumps(state_dict, indent=2, default=str)
+    # ── PROMPT CUSTOMIZATION: Section 1 — Header ────────────────────────────
+    # Mirrors BaseLLMPlayer._build_prompt() section 1.
+    # Edit here to add/remove header lines shown to the model before the JSON.
+    parts.append("=== CATAN GAME STATE ===")
+    parts.append(f"Turn: {state.num_turns}")
+    parts.append(f"Phase: {state.current_prompt.value}")
+    parts.append(f"You are: {scenario.perspective_color.value}")
+    if state.is_initial_build_phase:
+        parts.append(f"Initial build phase: {state.is_initial_build_phase}")
 
-    # Build the user prompt: structured state block + open-ended question
-    prompt_parts = [
-        "=== CATAN GAME STATE ===",
-        state_json,
-        "=== END GAME STATE ===",
-        "",
-        "=== QUESTION ===",
-        scenario.question,
-        "=== END QUESTION ===",
-    ]
-    user_prompt = "\n".join(prompt_parts)
+    # Trade context (mirrors _build_prompt — shown when a trade is active)
+    if state.is_resolving_trade:
+        offer = state.current_trade[:5]
+        ask = state.current_trade[5:10]
+        resource_names = ["wood", "brick", "sheep", "wheat", "ore"]
+        offer_str = ", ".join(f"{resource_names[i]}: {v}" for i, v in enumerate(offer) if v > 0)
+        ask_str = ", ".join(f"{resource_names[i]}: {v}" for i, v in enumerate(ask) if v > 0)
+        parts.append(f"Active trade - Offering: [{offer_str}], Asking: [{ask_str}]")
 
-    # Create a fresh agent with the scenario's custom system prompt.
+    parts.append("")  # blank line separator
+
+    # ── PROMPT CUSTOMIZATION: Section 2 — State JSON ────────────────────────
+    # Mirrors BaseLLMPlayer._build_prompt() section 2 exactly.
+    # StateFormatter.format_full_state() is the single source of truth;
+    # edit that function (players/llm/state_formatter.py) to change what
+    # fields are included — don't duplicate logic here.
+    game_state = StateFormatter.format_full_state(game, scenario.perspective_color)
+    game_state.get("my_state", {}).pop("color", None)  # redundant with header "You are:"
+    game_state_json = json.dumps(game_state, indent=2, default=str)
+    parts.append("=== STRUCTURED_STATE_JSON ===")
+    parts.append(game_state_json)
+    parts.append("=== END_STRUCTURED_STATE_JSON ===")
+    parts.append("")  # blank line separator
+
+    # ── PROMPT CUSTOMIZATION: Section 3 — Question ──────────────────────────
+    # Understanding-test-specific; no equivalent in the live agent.
+    # To change the question for a specific test, edit scenario.question.
+    parts.append("=== QUESTION ===")
+    parts.append(scenario.question)
+    parts.append("=== END QUESTION ===")
+
+    user_prompt = "\n".join(parts)
+
+    # ── PROMPT CUSTOMIZATION: System prompt ─────────────────────────────────
+    # Each scenario supplies its own system_prompt.
+    # To use the same system prompt as the live game agent, replace
+    # `scenario.system_prompt` with `CATAN_SYSTEM_PROMPT` (imported above).
     resolved_model = create_model(model)
     agent: Agent[None, str] = Agent(
         resolved_model,
-        system_prompt=scenario.system_prompt,
+        system_prompt=scenario.system_prompt,  # ◀ swap with CATAN_SYSTEM_PROMPT to test live prompt
         output_type=str,
     )
 
