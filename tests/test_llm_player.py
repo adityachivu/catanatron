@@ -1181,8 +1181,8 @@ class TestIntegrationWithTestModel:
         print("="*80)
         print("\nSYSTEM PROMPT (from agent):")
         print("="*80)
-        from catanatron.players.llm.base import CATAN_SYSTEM_PROMPT
-        print(CATAN_SYSTEM_PROMPT)
+        from catanatron.players.llm.persona import load_persona
+        print(load_persona("default").system_prompt)
         print("="*80 + "\n")
         
         # Verify minimal prompt contains header and state but no actions section

@@ -25,15 +25,15 @@ def _get_default_model():
     return os.environ.get("CATAN_LLM_MODEL", "anthropic:claude-sonnet-4-20250514")
 
 
-def create_llm_player(color, model=None):
+def create_llm_player(color, model=None, persona="default"):
     """Factory for pure LLM player."""
     from catanatron.players.llm_player import PydanticAIPlayer
 
     model = model or _get_default_model()
-    return PydanticAIPlayer(color, model=model)
+    return PydanticAIPlayer(color, model=model, persona=persona or "default")
 
 
-def create_llm_alphabeta_player(color, model=None, depth="2", prunning="False"):
+def create_llm_alphabeta_player(color, model=None, depth="2", prunning="False", persona="default"):
     """Factory for LLM + AlphaBeta hybrid player."""
     from catanatron.players.llm_player import LLMAlphaBetaPlayer
 
@@ -43,10 +43,11 @@ def create_llm_alphabeta_player(color, model=None, depth="2", prunning="False"):
         model=model,
         depth=int(depth),
         prunning=prunning.lower() == "true",
+        persona=persona or "default",
     )
 
 
-def create_llm_mcts_player(color, model=None, num_simulations="10"):
+def create_llm_mcts_player(color, model=None, num_simulations="10", persona="default"):
     """Factory for LLM + MCTS hybrid player."""
     from catanatron.players.llm_player import LLMMCTSPlayer
 
@@ -55,15 +56,16 @@ def create_llm_mcts_player(color, model=None, num_simulations="10"):
         color,
         model=model,
         num_simulations=int(num_simulations),
+        persona=persona or "default",
     )
 
 
-def create_llm_value_player(color, model=None):
+def create_llm_value_player(color, model=None, persona="default"):
     """Factory for LLM + Value Function hybrid player."""
     from catanatron.players.llm_player import LLMValuePlayer
 
     model = model or _get_default_model()
-    return LLMValuePlayer(color, model=model)
+    return LLMValuePlayer(color, model=model, persona=persona or "default")
 CLI_PLAYERS = [
     CliPlayer(
         "H", "HumanPlayer", "Human player, uses input() to get action.", HumanPlayer
@@ -120,28 +122,28 @@ CLI_PLAYERS = [
         "LLM",
         "PydanticAIPlayer",
         "Pure LLM player using PydanticAI. Set ANTHROPIC_API_KEY or OPENAI_API_KEY env var. "
-        "Optional param: MODEL (e.g., LLM:openai:gpt-4o)",
+        "Params: MODEL, PERSONA. Example: LLM:openai:gpt-4o:friendly or LLM::friendly",
         create_llm_player,
     ),
     CliPlayer(
         "LLMAB",
         "LLMAlphaBetaPlayer",
-        "LLM with AlphaBeta strategy advisor. Params: MODEL, DEPTH, PRUNNING. "
-        "Example: LLMAB:anthropic:claude-sonnet-4-20250514:3:True or LLMAB::3 to use default model",
+        "LLM with AlphaBeta strategy advisor. Params: MODEL, DEPTH, PRUNNING, PERSONA. "
+        "Example: LLMAB:anthropic:claude-sonnet-4-20250514:3:True:friendly or LLMAB::2:False:aggressive",
         create_llm_alphabeta_player,
     ),
     CliPlayer(
         "LLMM",
         "LLMMCTSPlayer",
-        "LLM with MCTS strategy advisor. Params: MODEL, NUM_SIMULATIONS. "
-        "Example: LLMM:openai:gpt-4o:20 or LLMM::20 to use default model",
+        "LLM with MCTS strategy advisor. Params: MODEL, NUM_SIMULATIONS, PERSONA. "
+        "Example: LLMM:openai:gpt-4o:20:friendly or LLMM::20:aggressive",
         create_llm_mcts_player,
     ),
     CliPlayer(
         "LLMV",
         "LLMValuePlayer",
-        "LLM with Value Function strategy advisor. Params: MODEL. "
-        "Example: LLMV:anthropic:claude-sonnet-4-20250514 or just LLMV for default",
+        "LLM with Value Function strategy advisor. Params: MODEL, PERSONA. "
+        "Example: LLMV:anthropic:claude-sonnet-4-20250514:friendly or LLMV::aggressive",
         create_llm_value_player,
     ),
 ]
