@@ -852,6 +852,99 @@ class TestNegotiationWithTestModel:
         assert len(leaver.negotiation_history) == 2
         assert leaver.negotiation_history[1].content == "deal"
 
+    def test_leave_negotiation_tool_records_departure_for_non_initiator(self):
+        """leave_negotiation should append a system-style line to the chat
+        transcript so remaining speakers see who is still in the room."""
+        from catanatron.players.llm.negotiation import (
+            NegotiationManager,
+            NegotiationSession,
+        )
+        from catanatron.players.llm.base import CatanDependencies
+        from catanatron.players.llm.toolsets import leave_negotiation
+        from catanatron.players.llm_player import PydanticAIPlayer
+
+        initiator = PydanticAIPlayer(Color.RED, model=TestModel())
+        leaver = PydanticAIPlayer(Color.BLUE, model=TestModel())
+
+        manager = NegotiationManager(max_rounds=3)
+        manager.register_player(initiator)
+        manager.register_player(leaver)
+
+        session = NegotiationSession(
+            initiator=Color.RED,
+            participants=[Color.RED, Color.BLUE],
+        )
+        session.add_message(Color.RED, "2 wood for 1 wheat?")
+        session.add_message(Color.BLUE, "deal")
+        manager.current_session = session
+
+        deps = CatanDependencies(
+            color=Color.BLUE,
+            game=None,  # not consulted by leave_negotiation
+            playable_actions=[],
+            strategy_recommendation=None,
+            strategy_reasoning=None,
+            turn_number=0,
+            is_my_turn=False,
+            negotiation_manager=manager,
+            player_instance=leaver,
+        )
+
+        ctx = MagicMock()
+        ctx.deps = deps
+
+        result = leave_negotiation(ctx)
+        assert result["success"] is True
+        assert Color.BLUE not in session.participants
+        # Departure recorded in transcript
+        assert session.messages[-1].sender == Color.BLUE
+        assert "left the negotiation" in session.messages[-1].content
+
+    def test_leave_negotiation_tool_initiator_ends_messaging(self):
+        """When the initiator calls leave_negotiation it must end the messaging
+        phase (is_active=False) rather than silently no-op."""
+        from catanatron.players.llm.negotiation import (
+            NegotiationManager,
+            NegotiationSession,
+        )
+        from catanatron.players.llm.base import CatanDependencies
+        from catanatron.players.llm.toolsets import leave_negotiation
+        from catanatron.players.llm_player import PydanticAIPlayer
+
+        initiator = PydanticAIPlayer(Color.RED, model=TestModel())
+        other = PydanticAIPlayer(Color.BLUE, model=TestModel())
+
+        manager = NegotiationManager(max_rounds=10)
+        manager.register_player(initiator)
+        manager.register_player(other)
+
+        session = NegotiationSession(
+            initiator=Color.RED,
+            participants=[Color.RED, Color.BLUE],
+        )
+        manager.current_session = session
+        assert session.is_active is True
+
+        deps = CatanDependencies(
+            color=Color.RED,
+            game=None,
+            playable_actions=[],
+            strategy_recommendation=None,
+            strategy_reasoning=None,
+            turn_number=0,
+            is_my_turn=True,
+            negotiation_manager=manager,
+            player_instance=initiator,
+        )
+        ctx = MagicMock()
+        ctx.deps = deps
+
+        result = leave_negotiation(ctx)
+        assert result["success"] is True
+        assert session.is_active is False
+        # Initiator stays in participants (they still need to finalize)
+        assert Color.RED in session.participants
+
 
 # ============= Toolset Tests =============
 

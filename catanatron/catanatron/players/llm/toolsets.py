@@ -172,23 +172,51 @@ def leave_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
     """
     Exit the current negotiation early.
 
-    Use this if you don't want to continue participating in the negotiation.
-    Note: Only the initiator can end the negotiation with a trade offer.
+    For non-initiators: removes you from the messaging phase. Other players
+    can keep talking; the initiator will still finalize a trade offer.
+
+    For the initiator: ends the messaging phase immediately and proceeds to
+    trade finalization. Use this once another player has accepted your terms
+    and there is nothing more to discuss.
     """
     player = ctx.deps.player_instance
     if player is None or player.negotiation_manager is None:
         return {"error": "Not in an active negotiation."}
 
     manager = player.negotiation_manager
-    if manager.current_session is None:
+    session = manager.current_session
+    if session is None:
         return {"error": "No active negotiation session."}
 
-    manager.remove_participant(ctx.deps.color)
+    color = ctx.deps.color
+
+    if color == session.initiator:
+        # Initiator cannot be removed from participants (they own finalization),
+        # but their leave is the signal to end messaging and proceed to finalize.
+        session.is_active = False
+        session.add_message(color, "[ended messaging and moved to finalize the trade]")
+        return {
+            "success": True,
+            "message": "Messaging ended. You will now finalize the trade offer.",
+            "your_color": color.value,
+        }
+
+    removed = manager.remove_participant(color)
+    if not removed:
+        return {
+            "success": False,
+            "message": "You are not currently in the negotiation.",
+            "your_color": color.value,
+        }
+
+    # Surface the departure inside the transcript so remaining speakers
+    # (and downstream DECIDE_TRADE consumers) see who is still in the chat.
+    session.add_message(color, "[left the negotiation]")
 
     return {
         "success": True,
         "message": "You have left the negotiation.",
-        "your_color": ctx.deps.color.value,
+        "your_color": color.value,
     }
 
 
