@@ -60,6 +60,7 @@ class CatanDependencies:
     # Negotiation support
     negotiation_manager: Optional["NegotiationManager"] = None
     player_instance: Optional[Any] = None  # Reference to the player for storing trade actions
+    negotiation_messages: Optional[List["NegotiationMessage"]] = None
 
 
 # System prompt for the Catan agent
