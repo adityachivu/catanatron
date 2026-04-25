@@ -640,6 +640,16 @@ class NegotiationManager:
         lines.append("")
         lines.append("Do NOT call send_message more than once. The game state is already provided above.")
 
+        # Persona-specific chat style instructions (if any)
+        speaker_player = self.players.get(speaker)
+        persona = getattr(speaker_player, "persona", None)
+        chat_instructions = getattr(persona, "chat_instructions", "") if persona else ""
+        if chat_instructions:
+            lines.append("")
+            lines.append("=== PERSONA CHAT STYLE ===")
+            lines.append(chat_instructions)
+            lines.append("=== END_PERSONA_CHAT_STYLE ===")
+
         return "\n".join(lines)
     
     def _build_finalization_prompt(self, session: NegotiationSession) -> str:

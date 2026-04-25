@@ -53,6 +53,7 @@ class PydanticAIPlayer(BaseLLMPlayer):
         is_bot: bool = True,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        persona: str = "default",
     ):
         super().__init__(
             color,
@@ -61,6 +62,7 @@ class PydanticAIPlayer(BaseLLMPlayer):
             is_bot=is_bot,
             temperature=temperature,
             max_tokens=max_tokens,
+            persona=persona,
         )
 
 
@@ -92,6 +94,7 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer):
         is_bot: bool = True,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        persona: str = "default",
     ):
         advisor = AlphaBetaPlayer(color, depth=depth, prunning=prunning)
         super().__init__(
@@ -104,6 +107,7 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer):
             tool_calls_limit=tool_calls_limit,
             temperature=temperature,
             max_tokens=max_tokens,
+            persona=persona,
         )
 
     def __repr__(self) -> str:
@@ -142,6 +146,7 @@ class LLMMCTSPlayer(BaseLLMPlayer):
         is_bot: bool = True,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        persona: str = "default",
     ):
         advisor = MCTSPlayer(color, num_simulations=num_simulations, prunning=prunning)
         super().__init__(
@@ -154,6 +159,7 @@ class LLMMCTSPlayer(BaseLLMPlayer):
             tool_calls_limit=tool_calls_limit,
             temperature=temperature,
             max_tokens=max_tokens,
+            persona=persona,
         )
 
     def __repr__(self) -> str:
@@ -188,6 +194,7 @@ class LLMValuePlayer(BaseLLMPlayer):
         is_bot: bool = True,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        persona: str = "default",
     ):
         advisor = ValueFunctionPlayer(color, value_fn_builder_name=value_fn_builder_name)
         super().__init__(
@@ -200,6 +207,7 @@ class LLMValuePlayer(BaseLLMPlayer):
             tool_calls_limit=tool_calls_limit,
             temperature=temperature,
             max_tokens=max_tokens,
+            persona=persona,
         )
 
     def __repr__(self) -> str:
