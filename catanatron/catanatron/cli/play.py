@@ -1,4 +1,5 @@
 import os
+import getpass
 import importlib.util
 from dataclasses import dataclass
 from typing import Literal, Union
@@ -295,6 +296,7 @@ def play_batch_core(num_games, players, game_config, accumulators=[]):
             accumulator.before_all()
 
     player_codes = [str(p) for p in players]
+    run_tag = os.environ.get("CATAN_LOGFIRE_TAG") or getpass.getuser()
     batch_ctx = (
         logfire.span(
             "catanatron.play_batch",
@@ -302,6 +304,7 @@ def play_batch_core(num_games, players, game_config, accumulators=[]):
             players=player_codes,
             map=game_config.map_type,
             vps_to_win=game_config.vps_to_win,
+            _tags=[run_tag],
         )
         if logfire is not None
         else nullcontext()
