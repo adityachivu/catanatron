@@ -679,7 +679,11 @@ class BaseLLMPlayer(Player):
         if self.history_manager.is_new_turn(current_turn):
             self.history_manager.clear()
             self.history_manager.set_turn(current_turn)
-            self.clear_negotiation_history()
+            # DECIDE_TRADE for a non-initiator fires on a new per-player turn
+            # right after the negotiation it belongs to; preserve the transcript
+            # so _build_prompt can inject it as PRIOR NEGOTIATION context.
+            if game.state.current_prompt != ActionPrompt.DECIDE_TRADE:
+                self.clear_negotiation_history()
             self._memory_reads_this_turn = 0
             self._memory_writes_this_turn = 0
 
