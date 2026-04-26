@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import yaml
 
@@ -32,10 +32,27 @@ class PersonaNotFound(FileNotFoundError):
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    """Per-persona configuration for the in-game free-text memory feature.
+
+    When a persona's YAML includes a ``memory:`` block with ``enabled: true``,
+    the LLM player gains ``read_memory`` and ``write_memory`` tools whose use
+    is rate-limited per turn. ``prompt_hint`` is injected into the per-turn
+    user prompt so the agent knows the tools exist and how to use them.
+    """
+
+    enabled: bool
+    max_reads_per_turn: int
+    max_writes_per_turn: int
+    prompt_hint: str
+
+
+@dataclass(frozen=True)
 class Persona:
     name: str
     system_prompt: str
     chat_instructions: str
+    memory: Optional[MemoryConfig] = None
 
 
 def _search_paths(name: str) -> List[Path]:
@@ -74,4 +91,29 @@ def _load_from_path(path: Path, expected_name: str) -> Persona:
         name=data.get("name", expected_name),
         system_prompt=(data.get("system_prompt") or "").strip(),
         chat_instructions=(data.get("chat_instructions") or "").strip(),
+        memory=_parse_memory(data.get("memory"), path),
+    )
+
+
+def _parse_memory(raw: Any, path: Path) -> Optional[MemoryConfig]:
+    """Parse the optional ``memory:`` block from a persona YAML.
+
+    Returns ``None`` (the disabled sentinel) when the block is absent, the
+    YAML maps to a non-mapping, or ``enabled`` is missing/false. This way
+    consumers only need a single ``if persona.memory:`` check.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Persona file {path}: 'memory' must be a YAML mapping if present"
+        )
+    if not raw.get("enabled"):
+        return None
+
+    return MemoryConfig(
+        enabled=True,
+        max_reads_per_turn=int(raw.get("max_reads_per_turn", 3)),
+        max_writes_per_turn=int(raw.get("max_writes_per_turn", 1)),
+        prompt_hint=(raw.get("prompt_hint") or "").strip(),
     )
