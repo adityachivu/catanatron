@@ -391,17 +391,17 @@ class NegotiationManager:
         """
         from catanatron.players.llm.toolsets import NEGOTIATION_PARTICIPANT_TOOLSET
         from catanatron.players.llm.base import CatanDependencies
-        
+
         while session.is_active:
             current_color = session.current_speaker
             player = self.players.get(current_color)
-            
+
             if player is None:
                 session.advance_turn()
                 continue
-            
+
             prompt = self._build_messaging_prompt(session, current_color)
-            
+
             deps = CatanDependencies(
                 color=current_color,
                 game=game,
@@ -414,7 +414,7 @@ class NegotiationManager:
                 player_instance=player,
                 negotiation_messages=list(session.messages),
             )
-            
+
             for attempt in range(MAX_NEGOTIATION_RETRIES):
                 try:
                     player.agent.run_sync(

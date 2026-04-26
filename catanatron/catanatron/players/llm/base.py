@@ -150,6 +150,13 @@ class BaseLLMPlayer(Player):
         self._pending_negotiation_request: bool = False
         self._last_negotiation_turn: int = -1
 
+        # Free-text memory (opt-in via persona.memory). Persists across turns
+        # within a single game; cleared in reset_state(). Per-turn read/write
+        # counters are reset at the turn boundary in _decide_core().
+        self.memory: str = ""
+        self._memory_reads_this_turn: int = 0
+        self._memory_writes_this_turn: int = 0
+
         # Logfire player_turn span (persists across decide() calls within a turn)
         self._turn_span_cm: Any = None
         self._turn_span_turn: int = -1
@@ -243,14 +250,20 @@ class BaseLLMPlayer(Player):
             List of FunctionToolset instances to pass to agent.run_sync()
         """
         from catanatron.players.llm.toolsets import (
+            MEMORY_TOOLSET,
             NORMAL_PLAY_TOOLSET,
             NORMAL_PLAY_WITH_TRADE_TOOLSET,
         )
-        
+
         if self._can_trade(game):
-            return [NORMAL_PLAY_WITH_TRADE_TOOLSET]
+            toolsets: List[FunctionToolset] = [NORMAL_PLAY_WITH_TRADE_TOOLSET]
         else:
-            return [NORMAL_PLAY_TOOLSET]
+            toolsets = [NORMAL_PLAY_TOOLSET]
+
+        if self.persona.memory is not None:
+            toolsets.append(MEMORY_TOOLSET)
+
+        return toolsets
     
     def _can_trade(self, game: Game) -> bool:
         """
@@ -464,6 +477,21 @@ class BaseLLMPlayer(Player):
                     "Consider the negotiation context when deciding whether to accept or reject."
                 )
 
+        # Memory tools (only when persona opts in)
+        if self.persona.memory is not None:
+            cfg = self.persona.memory
+            reads_left = max(cfg.max_reads_per_turn - self._memory_reads_this_turn, 0)
+            writes_left = max(cfg.max_writes_per_turn - self._memory_writes_this_turn, 0)
+            parts.append("")
+            parts.append("=== MEMORY TOOLS ===")
+            if cfg.prompt_hint:
+                parts.append(cfg.prompt_hint)
+            parts.append(
+                f"Budget remaining this turn: {reads_left} read_memory, "
+                f"{writes_left} write_memory."
+            )
+            parts.append("=== END_MEMORY_TOOLS ===")
+
         parts.append("")  # blank line separator
 
         # ── 2. Structured state JSON ───────────────────────────────────
@@ -652,6 +680,8 @@ class BaseLLMPlayer(Player):
             self.history_manager.clear()
             self.history_manager.set_turn(current_turn)
             self.clear_negotiation_history()
+            self._memory_reads_this_turn = 0
+            self._memory_writes_this_turn = 0
 
         # 3. Clear pending flags from previous runs
         self._pending_trade_action = None
@@ -773,6 +803,9 @@ class BaseLLMPlayer(Player):
         self._pending_trade_action = None
         self._pending_negotiation_request = False
         self._last_negotiation_turn = -1
+        self.memory = ""
+        self._memory_reads_this_turn = 0
+        self._memory_writes_this_turn = 0
 
     def __getstate__(self):
         """
