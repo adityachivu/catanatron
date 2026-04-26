@@ -150,6 +150,8 @@ class BaseLLMPlayer(Player):
         self._pending_negotiation_request: bool = False
         self._last_negotiation_turn: int = -1
 
+        self.decision_deviations: List[dict] = []
+
         # Free-text memory (opt-in via persona.memory). Persists across turns
         # within a single game; cleared in reset_state(). Per-turn read/write
         # counters are reset at the turn boundary in _decide_core().
@@ -756,6 +758,7 @@ class BaseLLMPlayer(Player):
                 self.history_manager.update(result.all_messages())
 
                 action = self._resolve_action(result.output, playable_actions)
+                self._record_decision_deviation(action, result.output, current_turn, recommendations)
                 if logfire is not None:
                     logfire.info(
                         f"LLM player {self.color} chose action {action.action_type} after negotiation",
@@ -765,6 +768,7 @@ class BaseLLMPlayer(Player):
 
             # 9. Map output to Action (trade offers only come through negotiation now)
             action = self._resolve_action(result.output, playable_actions)
+            self._record_decision_deviation(action, result.output, current_turn, recommendations)
 
             log_kwargs: dict = {"turn_number": current_turn}
             if state.current_prompt == ActionPrompt.DECIDE_TRADE:
@@ -796,6 +800,26 @@ class BaseLLMPlayer(Player):
             return recommendation
         return playable_actions[0]
 
+    def _record_decision_deviation(self, action: Action, result_output, current_turn: int, recommendations: List[tuple]):
+        if not recommendations:
+            return
+        
+        # Determine rank
+        rank = -1
+        for i, (rec_action, _) in enumerate(recommendations):
+            if rec_action == action:
+                rank = i + 1
+                break
+        
+        self.decision_deviations.append({
+            "turn": current_turn,
+            "color": self.color.value,
+            "confidence": getattr(result_output, "confidence", None),
+            "rank": rank,
+            "action": action.action_type.value,
+            "reasoning": getattr(result_output, "reasoning", None),
+        })
+
     def reset_state(self):
         """Reset state between games."""
         super().reset_state()
@@ -810,6 +834,7 @@ class BaseLLMPlayer(Player):
         self.memory = ""
         self._memory_reads_this_turn = 0
         self._memory_writes_this_turn = 0
+        self.decision_deviations = []
 
     def __getstate__(self):
         """

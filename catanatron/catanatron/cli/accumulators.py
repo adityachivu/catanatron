@@ -13,7 +13,29 @@ from catanatron.state_functions import (
     get_player_buildings,
 )
 from catanatron.models.enums import VICTORY_POINT, SETTLEMENT, CITY
+from catanatron.cli.simulation_accumulator import SimulationAccumulator
 
+
+class DecisionDeviationAccumulator(SimulationAccumulator):
+    def __init__(self, output_path, players):
+        self.output_path = output_path
+        self.players = players
+        self.deviations = []
+
+    def after(self, game: Game):
+        # We don't need to do anything per game since the player objects persist and hold their deviations
+        pass
+
+    def after_all(self):
+        from catanatron.players.llm.base import BaseLLMPlayer
+        
+        for player in self.players:
+            if isinstance(player, BaseLLMPlayer):
+                self.deviations.extend(player.decision_deviations)
+                
+        if self.output_path:
+            with open(self.output_path, "w") as f:
+                json.dump(self.deviations, f, indent=2)
 
 class VpDistributionAccumulator(GameAccumulator):
     """
