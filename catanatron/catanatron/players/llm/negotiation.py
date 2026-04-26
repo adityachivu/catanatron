@@ -89,7 +89,16 @@ class NegotiationSession:
     max_rounds: int = 10
     current_round: int = 0
     game: Optional[Game] = None
-    
+    # Preserved copy of the invitee list. `participants` is mutated by
+    # `remove_participant` when a player leaves, so we keep the original
+    # list to distribute chat history to everyone who was invited —
+    # including those who left early after verbally agreeing.
+    original_participants: List[Color] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.original_participants:
+            self.original_participants = list(self.participants)
+
     @property
     def current_speaker(self) -> Color:
         """Get the color of the current speaker."""
@@ -382,17 +391,17 @@ class NegotiationManager:
         """
         from catanatron.players.llm.toolsets import NEGOTIATION_PARTICIPANT_TOOLSET
         from catanatron.players.llm.base import CatanDependencies
-        
+
         while session.is_active:
             current_color = session.current_speaker
             player = self.players.get(current_color)
-            
+
             if player is None:
                 session.advance_turn()
                 continue
-            
+
             prompt = self._build_messaging_prompt(session, current_color)
-            
+
             deps = CatanDependencies(
                 color=current_color,
                 game=game,
@@ -403,8 +412,9 @@ class NegotiationManager:
                 is_my_turn=False,
                 negotiation_manager=self,
                 player_instance=player,
+                negotiation_messages=list(session.messages),
             )
-            
+
             for attempt in range(MAX_NEGOTIATION_RETRIES):
                 try:
                     player.agent.run_sync(
@@ -503,6 +513,7 @@ class NegotiationManager:
             is_my_turn=True,
             negotiation_manager=self,
             player_instance=player,
+            negotiation_messages=list(session.messages),
         )
         
         player._pending_trade_action = None
@@ -640,6 +651,16 @@ class NegotiationManager:
         lines.append("")
         lines.append("Do NOT call send_message more than once. The game state is already provided above.")
 
+        # Persona-specific chat style instructions (if any)
+        speaker_player = self.players.get(speaker)
+        persona = getattr(speaker_player, "persona", None)
+        chat_instructions = getattr(persona, "chat_instructions", "") if persona else ""
+        if chat_instructions:
+            lines.append("")
+            lines.append("=== PERSONA CHAT STYLE ===")
+            lines.append(chat_instructions)
+            lines.append("=== END_PERSONA_CHAT_STYLE ===")
+
         return "\n".join(lines)
     
     def _build_finalization_prompt(self, session: NegotiationSession) -> str:
@@ -734,8 +755,10 @@ class NegotiationManager:
         
         messages = self.current_session.messages.copy()
         
-        # Store history on each participant
-        for color in self.current_session.participants:
+        # Store history on every original invitee, including any who left
+        # mid-session (they still need the transcript to recognize trades
+        # they verbally agreed to when DECIDE_TRADE fires).
+        for color in self.current_session.original_participants:
             player = self.players.get(color)
             if player is not None:
                 player.store_negotiation_history(messages)

@@ -341,6 +341,187 @@ class TestPydanticAIPlayerWithMock:
             assert player.history_manager.current_turn == 999
 
 
+class TestPlayerMemory:
+    """Tests for the opt-in free-text memory feature."""
+
+    @staticmethod
+    def _make_ctx(player):
+        """Build a minimal RunContext-like object for direct tool invocation.
+
+        The tool functions only read ``ctx.deps.player_instance``, so a plain
+        SimpleNamespace satisfies the contract without dragging in PydanticAI's
+        full RunContext machinery.
+        """
+        from types import SimpleNamespace
+
+        deps = SimpleNamespace(player_instance=player)
+        return SimpleNamespace(deps=deps)
+
+    def _make_memory_player(self, color=Color.RED):
+        from catanatron.players.llm_player import PydanticAIPlayer
+
+        with patch("catanatron.players.llm.base.Agent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            return PydanticAIPlayer(color, persona="default_with_memory")
+
+    def test_memory_starts_empty(self):
+        player = self._make_memory_player()
+        assert player.memory == ""
+        assert player._memory_reads_this_turn == 0
+        assert player._memory_writes_this_turn == 0
+
+    def test_write_then_read_roundtrip(self):
+        from catanatron.players.llm.toolsets import read_memory, write_memory
+
+        player = self._make_memory_player()
+        ctx = self._make_ctx(player)
+
+        result = write_memory(ctx, "blue plays aggressive on wood")
+        assert result.get("success") is True
+
+        read_result = read_memory(ctx)
+        assert read_result["memory"] == "blue plays aggressive on wood"
+
+    def test_write_budget_enforced_and_preserves_content(self):
+        from catanatron.players.llm.toolsets import write_memory
+
+        player = self._make_memory_player()
+        cfg = player.persona.memory
+        ctx = self._make_ctx(player)
+
+        # Use up the entire write budget
+        for i in range(cfg.max_writes_per_turn):
+            assert write_memory(ctx, f"v{i}").get("success") is True
+
+        last_value = player.memory
+        # Next write must fail without modifying memory
+        result = write_memory(ctx, "should not be stored")
+        assert "error" in result
+        assert player.memory == last_value
+
+    def test_read_budget_enforced(self):
+        from catanatron.players.llm.toolsets import read_memory
+
+        player = self._make_memory_player()
+        cfg = player.persona.memory
+        ctx = self._make_ctx(player)
+
+        for _ in range(cfg.max_reads_per_turn):
+            assert "memory" in read_memory(ctx)
+
+        result = read_memory(ctx)
+        assert "error" in result
+
+    def test_turn_boundary_resets_counters_but_not_memory(self, game_after_initial_placement):
+        from catanatron.players.llm_player import PydanticAIPlayer
+        from catanatron.players.llm.output_types import ActionByIndex
+        from catanatron.players.llm.toolsets import write_memory
+
+        game = game_after_initial_placement
+
+        fake_actions = [
+            Action(Color.RED, ActionType.BUILD_ROAD, (0, 3)),
+            Action(Color.RED, ActionType.END_TURN, None),
+        ]
+
+        with patch("catanatron.players.llm.base.Agent") as MockAgent:
+            mock_agent = MagicMock()
+            mock_result = MagicMock()
+            mock_result.output = ActionByIndex(action_index=0)
+            mock_result.all_messages.return_value = []
+            mock_agent.run_sync.return_value = mock_result
+            MockAgent.return_value = mock_agent
+
+            player = PydanticAIPlayer(Color.RED, persona="default_with_memory")
+            ctx = self._make_ctx(player)
+
+            # Write something and exhaust the per-turn write budget
+            for i in range(player.persona.memory.max_writes_per_turn):
+                write_memory(ctx, f"turn-A v{i}")
+            assert player._memory_writes_this_turn == player.persona.memory.max_writes_per_turn
+            stored_before = player.memory
+
+            # First decide settles current turn into history_manager
+            player.decide(game, fake_actions)
+
+            # Simulate turn change
+            game.state.num_turns = 999
+
+            # Second decide crosses the turn boundary and resets counters
+            player.decide(game, fake_actions)
+
+            assert player._memory_reads_this_turn == 0
+            assert player._memory_writes_this_turn == 0
+            # Memory string itself must persist across turn boundary
+            assert player.memory == stored_before
+
+    def test_reset_state_clears_memory(self):
+        from catanatron.players.llm.toolsets import write_memory
+
+        player = self._make_memory_player()
+        ctx = self._make_ctx(player)
+        write_memory(ctx, "carry-over notes")
+        assert player.memory == "carry-over notes"
+
+        player.reset_state()
+
+        assert player.memory == ""
+        assert player._memory_reads_this_turn == 0
+        assert player._memory_writes_this_turn == 0
+
+    def test_memory_disabled_persona_returns_error_and_omits_toolset(self, game_after_initial_placement):
+        from catanatron.players.llm_player import PydanticAIPlayer
+        from catanatron.players.llm.toolsets import (
+            MEMORY_TOOLSET,
+            read_memory,
+            write_memory,
+        )
+
+        game = game_after_initial_placement
+
+        with patch("catanatron.players.llm.base.Agent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            player = PydanticAIPlayer(Color.RED, persona="default")  # no memory
+
+        ctx = self._make_ctx(player)
+
+        # Tool calls return an error dict instead of mutating state
+        assert "error" in read_memory(ctx)
+        assert "error" in write_memory(ctx, "ignored")
+
+        # Toolset selection does NOT include the memory toolset
+        toolsets = player._select_toolsets(game)
+        assert MEMORY_TOOLSET not in toolsets
+
+    def test_memory_enabled_persona_includes_memory_toolset(self, game_after_initial_placement):
+        from catanatron.players.llm.toolsets import MEMORY_TOOLSET
+
+        game = game_after_initial_placement
+        player = self._make_memory_player()
+
+        toolsets = player._select_toolsets(game)
+        assert MEMORY_TOOLSET in toolsets
+
+    def test_prompt_includes_memory_section_when_enabled(self, game_at_play_turn):
+        game = game_at_play_turn
+        player = self._make_memory_player()
+
+        prompt = player._build_prompt(game, game.playable_actions)
+        assert "MEMORY TOOLS" in prompt
+        assert "Budget remaining" in prompt
+
+    def test_prompt_omits_memory_section_when_disabled(self, game_at_play_turn):
+        from catanatron.players.llm_player import PydanticAIPlayer
+
+        game = game_at_play_turn
+        with patch("catanatron.players.llm.base.Agent") as MockAgent:
+            MockAgent.return_value = MagicMock()
+            player = PydanticAIPlayer(Color.RED, persona="default")
+
+        prompt = player._build_prompt(game, game.playable_actions)
+        assert "MEMORY TOOLS" not in prompt
+
+
 class TestLLMAlphaBetaPlayer:
     """Tests for LLMAlphaBetaPlayer."""
 
@@ -804,20 +985,146 @@ class TestNegotiationWithTestModel:
     def test_negotiation_message(self):
         """Test NegotiationMessage creation."""
         from catanatron.players.llm.negotiation import NegotiationMessage
-        
+
         msg = NegotiationMessage(
             sender=Color.RED,
             content="I need wheat!"
         )
-        
+
         assert msg.sender == Color.RED
         assert msg.content == "I need wheat!"
         assert msg.timestamp > 0
-        
+
         # Test to_dict
         d = msg.to_dict()
         assert d["sender"] == "RED"
         assert d["content"] == "I need wheat!"
+
+    def test_leaver_still_receives_chat_history(self):
+        """Players who leave mid-session must still receive the transcript,
+        so the DECIDE_TRADE prompt can remind them of any verbal agreement."""
+        from catanatron.players.llm.negotiation import (
+            NegotiationManager,
+            NegotiationSession,
+        )
+        from catanatron.players.llm_player import PydanticAIPlayer
+
+        initiator = PydanticAIPlayer(Color.RED, model=TestModel())
+        leaver = PydanticAIPlayer(Color.BLUE, model=TestModel())
+
+        manager = NegotiationManager(max_rounds=3)
+        manager.register_player(initiator)
+        manager.register_player(leaver)
+
+        session = NegotiationSession(
+            initiator=Color.RED,
+            participants=[Color.RED, Color.BLUE],
+        )
+        session.add_message(Color.RED, "2 wood for 1 wheat?")
+        session.add_message(Color.BLUE, "deal")
+        manager.current_session = session
+
+        assert session.remove_participant(Color.BLUE) is True
+        assert Color.BLUE not in session.participants
+        assert Color.BLUE in session.original_participants
+
+        manager._end_negotiation()
+
+        assert len(leaver.negotiation_history) == 2
+        assert leaver.negotiation_history[1].content == "deal"
+
+    def test_leave_negotiation_tool_records_departure_for_non_initiator(self):
+        """leave_negotiation should append a system-style line to the chat
+        transcript so remaining speakers see who is still in the room."""
+        from catanatron.players.llm.negotiation import (
+            NegotiationManager,
+            NegotiationSession,
+        )
+        from catanatron.players.llm.base import CatanDependencies
+        from catanatron.players.llm.toolsets import leave_negotiation
+        from catanatron.players.llm_player import PydanticAIPlayer
+
+        initiator = PydanticAIPlayer(Color.RED, model=TestModel())
+        leaver = PydanticAIPlayer(Color.BLUE, model=TestModel())
+
+        manager = NegotiationManager(max_rounds=3)
+        manager.register_player(initiator)
+        manager.register_player(leaver)
+
+        session = NegotiationSession(
+            initiator=Color.RED,
+            participants=[Color.RED, Color.BLUE],
+        )
+        session.add_message(Color.RED, "2 wood for 1 wheat?")
+        session.add_message(Color.BLUE, "deal")
+        manager.current_session = session
+
+        deps = CatanDependencies(
+            color=Color.BLUE,
+            game=None,  # not consulted by leave_negotiation
+            playable_actions=[],
+            strategy_recommendation=None,
+            strategy_reasoning=None,
+            turn_number=0,
+            is_my_turn=False,
+            negotiation_manager=manager,
+            player_instance=leaver,
+        )
+
+        ctx = MagicMock()
+        ctx.deps = deps
+
+        result = leave_negotiation(ctx)
+        assert result["success"] is True
+        assert Color.BLUE not in session.participants
+        # Departure recorded in transcript
+        assert session.messages[-1].sender == Color.BLUE
+        assert "left the negotiation" in session.messages[-1].content
+
+    def test_leave_negotiation_tool_initiator_ends_messaging(self):
+        """When the initiator calls leave_negotiation it must end the messaging
+        phase (is_active=False) rather than silently no-op."""
+        from catanatron.players.llm.negotiation import (
+            NegotiationManager,
+            NegotiationSession,
+        )
+        from catanatron.players.llm.base import CatanDependencies
+        from catanatron.players.llm.toolsets import leave_negotiation
+        from catanatron.players.llm_player import PydanticAIPlayer
+
+        initiator = PydanticAIPlayer(Color.RED, model=TestModel())
+        other = PydanticAIPlayer(Color.BLUE, model=TestModel())
+
+        manager = NegotiationManager(max_rounds=10)
+        manager.register_player(initiator)
+        manager.register_player(other)
+
+        session = NegotiationSession(
+            initiator=Color.RED,
+            participants=[Color.RED, Color.BLUE],
+        )
+        manager.current_session = session
+        assert session.is_active is True
+
+        deps = CatanDependencies(
+            color=Color.RED,
+            game=None,
+            playable_actions=[],
+            strategy_recommendation=None,
+            strategy_reasoning=None,
+            turn_number=0,
+            is_my_turn=True,
+            negotiation_manager=manager,
+            player_instance=initiator,
+        )
+        ctx = MagicMock()
+        ctx.deps = deps
+
+        result = leave_negotiation(ctx)
+        assert result["success"] is True
+        assert session.is_active is False
+        # Initiator stays in participants (they still need to finalize)
+        assert Color.RED in session.participants
 
 
 # ============= Toolset Tests =============
@@ -1055,8 +1362,8 @@ class TestIntegrationWithTestModel:
         print("="*80)
         print("\nSYSTEM PROMPT (from agent):")
         print("="*80)
-        from catanatron.players.llm.base import CATAN_SYSTEM_PROMPT
-        print(CATAN_SYSTEM_PROMPT)
+        from catanatron.players.llm.persona import load_persona
+        print(load_persona("default").system_prompt)
         print("="*80 + "\n")
         
         # Verify minimal prompt contains header and state but no actions section

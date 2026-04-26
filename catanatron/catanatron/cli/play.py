@@ -337,6 +337,14 @@ def play_batch_core(num_games, players, game_config, accumulators=[]):
             )
             with game_ctx as game_span:
                 game.play(accumulators)
+                # Close any open turn spans while still inside the play_game context.
+                # If the game ends mid-turn (e.g. winning on a build), decide() never
+                # returns END_TURN, so the span is left open. Calling reset_state()
+                # outside this block would detach those context tokens after play_game
+                # has already exited, making the next play_game span a child of this one.
+                for player in players:
+                    if isinstance(player, BaseLLMPlayer):
+                        player._close_turn_span()
                 if game_span is not None:
                     winner = game.winning_color()
                     game_span.set_attribute("winner", winner.value if winner else None)

@@ -19,6 +19,7 @@ Toolsets:
 - NORMAL_PLAY_WITH_TRADE_TOOLSET: initiate_negotiation (after rolling)
 - NEGOTIATION_PARTICIPANT_TOOLSET: Chat tools (during negotiation messaging)
 - TRADE_FINALIZE_TOOLSET: finalize_trade (post-negotiation trade decision)
+- MEMORY_TOOLSET: read_memory / write_memory (appended when persona opts in)
 """
 
 from typing import List, Dict, Any
@@ -172,29 +173,120 @@ def leave_negotiation(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
     """
     Exit the current negotiation early.
 
-    Use this if you don't want to continue participating in the negotiation.
-    Note: Only the initiator can end the negotiation with a trade offer.
+    For non-initiators: removes you from the messaging phase. Other players
+    can keep talking; the initiator will still finalize a trade offer.
+
+    For the initiator: ends the messaging phase immediately and proceeds to
+    trade finalization. Use this once another player has accepted your terms
+    and there is nothing more to discuss.
     """
     player = ctx.deps.player_instance
     if player is None or player.negotiation_manager is None:
         return {"error": "Not in an active negotiation."}
 
     manager = player.negotiation_manager
-    if manager.current_session is None:
+    session = manager.current_session
+    if session is None:
         return {"error": "No active negotiation session."}
 
-    manager.remove_participant(ctx.deps.color)
+    color = ctx.deps.color
+
+    if color == session.initiator:
+        # Initiator cannot be removed from participants (they own finalization),
+        # but their leave is the signal to end messaging and proceed to finalize.
+        session.is_active = False
+        session.add_message(color, "[ended messaging and moved to finalize the trade]")
+        return {
+            "success": True,
+            "message": "Messaging ended. You will now finalize the trade offer.",
+            "your_color": color.value,
+        }
+
+    removed = manager.remove_participant(color)
+    if not removed:
+        return {
+            "success": False,
+            "message": "You are not currently in the negotiation.",
+            "your_color": color.value,
+        }
+
+    # Surface the departure inside the transcript so remaining speakers
+    # (and downstream DECIDE_TRADE consumers) see who is still in the chat.
+    session.add_message(color, "[left the negotiation]")
 
     return {
         "success": True,
         "message": "You have left the negotiation.",
-        "your_color": ctx.deps.color.value,
+        "your_color": color.value,
     }
 
 
 # ============================================================================
 # Toolset Composition
 # ============================================================================
+
+def read_memory(ctx: RunContext[CatanDependencies]) -> Dict[str, Any]:
+    """
+    Read your persistent free-text memory for this game.
+
+    Memory is a single string that carries across all your turns until the
+    game ends. Use it to recall earlier observations before deciding.
+    Calls are rate-limited per turn (see your prompt for the budget).
+    """
+    player = ctx.deps.player_instance
+    if player is None or getattr(player, "persona", None) is None or player.persona.memory is None:
+        return {"error": "Memory is not enabled for this persona."}
+
+    cfg = player.persona.memory
+    if player._memory_reads_this_turn >= cfg.max_reads_per_turn:
+        return {
+            "error": (
+                f"Read budget exhausted ({cfg.max_reads_per_turn} reads/turn). "
+                "Use what you have already read; budget resets next turn."
+            ),
+        }
+
+    player._memory_reads_this_turn += 1
+    return {
+        "memory": player.memory,
+        "reads_remaining": cfg.max_reads_per_turn - player._memory_reads_this_turn,
+    }
+
+
+def write_memory(
+    ctx: RunContext[CatanDependencies],
+    content: str,
+) -> Dict[str, Any]:
+    """
+    Overwrite your persistent free-text memory.
+
+    The entire memory string is replaced — include everything you still want
+    to remember going forward. Calls are rate-limited per turn.
+
+    Args:
+        content: The new full contents of memory (free-form text).
+    """
+    player = ctx.deps.player_instance
+    if player is None or getattr(player, "persona", None) is None or player.persona.memory is None:
+        return {"error": "Memory is not enabled for this persona."}
+
+    cfg = player.persona.memory
+    if player._memory_writes_this_turn >= cfg.max_writes_per_turn:
+        return {
+            "error": (
+                f"Write budget exhausted ({cfg.max_writes_per_turn} writes/turn). "
+                "Previous memory is preserved; budget resets next turn."
+            ),
+        }
+
+    player._memory_writes_this_turn += 1
+    player.memory = content
+    return {
+        "success": True,
+        "writes_remaining": cfg.max_writes_per_turn - player._memory_writes_this_turn,
+        "stored_length": len(content),
+    }
+
 
 NORMAL_PLAY_TOOLSET = FunctionToolset(tools=[])
 
@@ -209,6 +301,11 @@ NEGOTIATION_PARTICIPANT_TOOLSET = FunctionToolset(tools=[
 
 TRADE_FINALIZE_TOOLSET = FunctionToolset(tools=[
     finalize_trade,
+])
+
+MEMORY_TOOLSET = FunctionToolset(tools=[
+    read_memory,
+    write_memory,
 ])
 
 

@@ -23,6 +23,7 @@ from catanatron.models.enums import Action, ActionPrompt, ActionType
 from catanatron.players.llm.output_types import ActionByIndex
 from catanatron.players.llm.history import ConversationHistoryManager
 from catanatron.players.llm.models import create_model, ModelConfig, ModelInput
+from catanatron.players.llm.persona import load_persona
 from catanatron.players.llm.state_formatter import StateFormatter
 from catanatron.state_functions import player_has_rolled
 
@@ -60,38 +61,10 @@ class CatanDependencies:
     # Negotiation support
     negotiation_manager: Optional["NegotiationManager"] = None
     player_instance: Optional[Any] = None  # Reference to the player for storing trade actions
+    negotiation_messages: Optional[List["NegotiationMessage"]] = None
 
 
-# System prompt for the Catan agent
-CATAN_SYSTEM_PROMPT = """You are an expert Settlers of Catan player. Your goal is to reach 10 victory points before your opponents.
-
-## Game Rules Summary
-- Victory points come from: settlements (1 VP), cities (2 VP), longest road (2 VP), largest army (2 VP), victory point cards (1 VP each)
-- Resources: Wood, Brick, Sheep, Wheat, Ore
-- Building costs:
-  - Road: 1 Wood + 1 Brick
-  - Settlement: 1 Wood + 1 Brick + 1 Sheep + 1 Wheat
-  - City: 2 Wheat + 3 Ore
-  - Development Card: 1 Sheep + 1 Wheat + 1 Ore
-
-## Strategy Tips
-- Diversify resource production by building on different numbers (6 and 8 are best)
-- Secure important intersection spots early in the game
-- Build towards valuable port locations for better trading rates
-- Consider blocking opponents' expansion paths
-- Time development card plays strategically (knights before rolling if robber is on you)
-- Balance between expansion and resource accumulation
-
-## Decision Making
-The full game state, legal actions, and strategy hints are provided in the user message each turn. Read them carefully before deciding.
-Use the available tools when helpful.
-When `initiate_negotiation` is available, prefer domestic trade over maritime trade.
-You can only negotiate once per turn; once the negotiation concludes no further trading is allowed that turn.
-Consider both immediate gains and long-term strategy.
-Pay attention to the negotiation history and performance of the other players.
-If a strategy advisor recommendation is provided, take it into consideration but make the final decision based on your analysis.
-
-Always return a valid action from the available options."""
+DEFAULT_PERSONA = "default"
 
 
 class BaseLLMPlayer(Player):
@@ -131,6 +104,7 @@ class BaseLLMPlayer(Player):
         is_bot: bool = True,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = 1024,
+        persona: str = DEFAULT_PERSONA,
     ):
         """
         Initialize the LLM player.
@@ -154,6 +128,7 @@ class BaseLLMPlayer(Player):
         super().__init__(color, is_bot)
         self.strategy_advisor = strategy_advisor
         self.top_k = top_k
+        self.persona = load_persona(persona)
 
         # Create model using factory - handles str, Model, ModelConfig, None
         self._model = create_model(model)
@@ -174,6 +149,13 @@ class BaseLLMPlayer(Player):
         self._pending_trade_action: Optional[Action] = None
         self._pending_negotiation_request: bool = False
         self._last_negotiation_turn: int = -1
+
+        # Free-text memory (opt-in via persona.memory). Persists across turns
+        # within a single game; cleared in reset_state(). Per-turn read/write
+        # counters are reset at the turn boundary in _decide_core().
+        self.memory: str = ""
+        self._memory_reads_this_turn: int = 0
+        self._memory_writes_this_turn: int = 0
 
         # Logfire player_turn span (persists across decide() calls within a turn)
         self._turn_span_cm: Any = None
@@ -206,7 +188,7 @@ class BaseLLMPlayer(Player):
             self._model,
             deps_type=CatanDependencies,
             output_type=ActionByIndex,
-            system_prompt=CATAN_SYSTEM_PROMPT,
+            system_prompt=self.persona.system_prompt,
             retries=3,
         )
 
@@ -268,14 +250,20 @@ class BaseLLMPlayer(Player):
             List of FunctionToolset instances to pass to agent.run_sync()
         """
         from catanatron.players.llm.toolsets import (
+            MEMORY_TOOLSET,
             NORMAL_PLAY_TOOLSET,
             NORMAL_PLAY_WITH_TRADE_TOOLSET,
         )
-        
+
         if self._can_trade(game):
-            return [NORMAL_PLAY_WITH_TRADE_TOOLSET]
+            toolsets: List[FunctionToolset] = [NORMAL_PLAY_WITH_TRADE_TOOLSET]
         else:
-            return [NORMAL_PLAY_TOOLSET]
+            toolsets = [NORMAL_PLAY_TOOLSET]
+
+        if self.persona.memory is not None:
+            toolsets.append(MEMORY_TOOLSET)
+
+        return toolsets
     
     def _can_trade(self, game: Game) -> bool:
         """
@@ -489,6 +477,21 @@ class BaseLLMPlayer(Player):
                     "Consider the negotiation context when deciding whether to accept or reject."
                 )
 
+        # Memory tools (only when persona opts in)
+        if self.persona.memory is not None:
+            cfg = self.persona.memory
+            reads_left = max(cfg.max_reads_per_turn - self._memory_reads_this_turn, 0)
+            writes_left = max(cfg.max_writes_per_turn - self._memory_writes_this_turn, 0)
+            parts.append("")
+            parts.append("=== MEMORY TOOLS ===")
+            if cfg.prompt_hint:
+                parts.append(cfg.prompt_hint)
+            parts.append(
+                f"Budget remaining this turn: {reads_left} read_memory, "
+                f"{writes_left} write_memory."
+            )
+            parts.append("=== END_MEMORY_TOOLS ===")
+
         parts.append("")  # blank line separator
 
         # ── 2. Structured state JSON ───────────────────────────────────
@@ -677,6 +680,8 @@ class BaseLLMPlayer(Player):
             self.history_manager.clear()
             self.history_manager.set_turn(current_turn)
             self.clear_negotiation_history()
+            self._memory_reads_this_turn = 0
+            self._memory_writes_this_turn = 0
 
         # 3. Clear pending flags from previous runs
         self._pending_trade_action = None
@@ -798,6 +803,9 @@ class BaseLLMPlayer(Player):
         self._pending_trade_action = None
         self._pending_negotiation_request = False
         self._last_negotiation_turn = -1
+        self.memory = ""
+        self._memory_reads_this_turn = 0
+        self._memory_writes_this_turn = 0
 
     def __getstate__(self):
         """
