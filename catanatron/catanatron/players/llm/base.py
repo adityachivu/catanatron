@@ -806,10 +806,15 @@ class BaseLLMPlayer(Player):
         
         # Determine rank
         rank = -1
-        for i, (rec_action, _) in enumerate(recommendations):
+        recs_list = []
+        for i, (rec_action, rec_reasoning) in enumerate(recommendations):
+            recs_list.append({
+                "action": rec_action.action_type.value,
+                "reasoning": rec_reasoning
+            })
             if rec_action == action:
                 rank = i + 1
-                break
+                # don't break, keep building recs_list
         
         self.decision_deviations.append({
             "turn": current_turn,
@@ -818,6 +823,7 @@ class BaseLLMPlayer(Player):
             "rank": rank,
             "action": action.action_type.value,
             "reasoning": getattr(result_output, "reasoning", None),
+            "top_k_recommendations": recs_list,
         })
 
     def reset_state(self):

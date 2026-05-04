@@ -17,9 +17,10 @@ from catanatron.cli.simulation_accumulator import SimulationAccumulator
 
 
 class DecisionDeviationAccumulator(SimulationAccumulator):
-    def __init__(self, output_path, players):
+    def __init__(self, output_path, players, include_recs=False):
         self.output_path = output_path
         self.players = players
+        self.include_recs = include_recs
         self.deviations = []
 
     def after(self, game: Game):
@@ -31,7 +32,12 @@ class DecisionDeviationAccumulator(SimulationAccumulator):
         
         for player in self.players:
             if isinstance(player, BaseLLMPlayer):
-                self.deviations.extend(player.decision_deviations)
+                for dev in player.decision_deviations:
+                    # Make a copy so we don't modify the player's internal state
+                    dev_copy = dev.copy()
+                    if not self.include_recs and "top_k_recommendations" in dev_copy:
+                        del dev_copy["top_k_recommendations"]
+                    self.deviations.append(dev_copy)
                 
         if self.output_path:
             with open(self.output_path, "w") as f:

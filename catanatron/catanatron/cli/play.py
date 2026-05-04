@@ -174,6 +174,12 @@ class CustomTimeRemainingColumn(TimeRemainingColumn):
     default=None,
     help="Path to save decision deviation logs as JSON.",
 )
+@click.option(
+    "--decision-deviation-include-recs",
+    is_flag=True,
+    default=False,
+    help="Include the strategy advisor's top-K recommendations in the decision deviation JSON.",
+)
 def simulate(
     num,
     players,
@@ -192,6 +198,7 @@ def simulate(
     help_players,
     enable_logfire,
     decision_deviation_output,
+    decision_deviation_include_recs,
 ):
     """
     Catan Bot Simulator.
@@ -229,7 +236,7 @@ def simulate(
 
     players = parse_cli_string(players)
     output_options = OutputOptions(
-        output, output_format, include_board_tensor, db, step_db, decision_deviation_output
+        output, output_format, include_board_tensor, db, step_db, decision_deviation_output, decision_deviation_include_recs
     )
     game_config = GameConfigOptions(
         config_discard_limit,
@@ -257,6 +264,7 @@ class OutputOptions:
     db: bool = False
     step_db: bool = False
     decision_deviation_output: Union[str, None] = None
+    decision_deviation_include_recs: bool = False
 
 
 @dataclass(frozen=True)
@@ -417,7 +425,7 @@ def play_batch(
         accumulators.append(StepDatabaseAccumulator())
     if output_options.decision_deviation_output:
         from catanatron.cli.accumulators import DecisionDeviationAccumulator
-        accumulators.append(DecisionDeviationAccumulator(output_options.decision_deviation_output, players))
+        accumulators.append(DecisionDeviationAccumulator(output_options.decision_deviation_output, players, output_options.decision_deviation_include_recs))
     for accumulator_class in CUSTOM_ACCUMULATORS:
         accumulators.append(accumulator_class(players=players, game_config=game_config))
 
