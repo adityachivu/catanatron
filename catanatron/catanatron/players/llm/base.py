@@ -808,20 +808,28 @@ class BaseLLMPlayer(Player):
         rank = -1
         recs_list = []
         for i, (rec_action, rec_reasoning) in enumerate(recommendations):
+            rec_str = f"{rec_action.action_type.value}"
+            if rec_action.value is not None:
+                rec_str += f" ({rec_action.value})"
+                
             recs_list.append({
-                "action": rec_action.action_type.value,
+                "action": rec_str,
                 "reasoning": rec_reasoning
             })
             if rec_action == action:
                 rank = i + 1
                 # don't break, keep building recs_list
         
+        action_str = f"{action.action_type.value}"
+        if action.value is not None:
+            action_str += f" ({action.value})"
+            
         self.decision_deviations.append({
             "turn": current_turn,
             "color": self.color.value,
             "confidence": getattr(result_output, "confidence", None),
             "rank": rank,
-            "action": action.action_type.value,
+            "action": action_str,
             "reasoning": getattr(result_output, "reasoning", None),
             "top_k_recommendations": recs_list,
         })
