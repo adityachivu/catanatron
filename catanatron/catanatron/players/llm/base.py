@@ -744,7 +744,7 @@ class BaseLLMPlayer(Player):
                 # Negotiation ended without trade -- re-run agent to continue turn
                 # (trade tools are now disabled since initiated_this_turn is set)
                 result = self.agent.run_sync(
-                    self._build_prompt(game, playable_actions, recommendation, reasoning),
+                    self._build_prompt(game, playable_actions, recommendations),
                     deps=deps,
                     message_history=self.history_manager.get_messages(),
                     toolsets=self._select_toolsets(game),
