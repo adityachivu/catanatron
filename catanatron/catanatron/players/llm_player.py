@@ -65,6 +65,13 @@ class PydanticAIPlayer(BaseLLMPlayer):
             persona=persona,
         )
 
+    def __repr__(self) -> str:
+        return (
+            f"PydanticAIPlayer:{self.color.value}"
+            f"[{self.model}]"
+            f"<{self.persona.name}>"
+        )
+
 
 class LLMAlphaBetaPlayer(BaseLLMPlayer):
     """
@@ -116,6 +123,7 @@ class LLMAlphaBetaPlayer(BaseLLMPlayer):
             f"LLMAlphaBetaPlayer:{self.color.value}"
             f"(depth={a.depth},prunning={a.prunning})"
             f"[{self.model}]"
+            f"<{self.persona.name}>"
         )
 
 
@@ -168,6 +176,7 @@ class LLMMCTSPlayer(BaseLLMPlayer):
             f"LLMMCTSPlayer:{self.color.value}"
             f"({a.num_simulations}:{a.prunning})"
             f"[{self.model}]"
+            f"<{self.persona.name}>"
         )
 
 
@@ -216,6 +225,7 @@ class LLMValuePlayer(BaseLLMPlayer):
             f"LLMValuePlayer:{self.color.value}"
             f"(value_fn={a.value_fn_builder_name})"
             f"[{self.model}]"
+            f"<{self.persona.name}>"
         )
 
 
