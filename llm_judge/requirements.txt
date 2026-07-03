@@ -1,0 +1,5 @@
+# Dependencies for the LLM-as-a-judge evaluation.
+# The game itself already depends on openai (see the `llm` extra in
+# pyproject.toml); these are pinned here so the judge can be installed on its own.
+openai>=1.50.0
+pydantic>=2.0
