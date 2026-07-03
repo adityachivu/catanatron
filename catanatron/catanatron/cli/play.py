@@ -170,6 +170,22 @@ class CustomTimeRemainingColumn(TimeRemainingColumn):
     is_flag=True,
     help="Enable Logfire monitoring. Also enabled by CATAN_LOGFIRE=1 env var.",
 )
+@click.option(
+    "--fair-trade-analysis",
+    default=False,
+    is_flag=True,
+    help="Enable FairTrade analysis: run MCTS before/after each player trade to measure win-probability shifts.",
+)
+@click.option(
+    "--fair-trade-simulations",
+    default=100,
+    help="Number of MCTS simulations per FairTrade analysis (default: 100).",
+)
+@click.option(
+    "--fair-trade-output",
+    default="fair_trade_logs",
+    help="Directory to save FairTrade JSON logs (default: fair_trade_logs).",
+)
 def simulate(
     num,
     players,
@@ -187,6 +203,9 @@ def simulate(
     quiet,
     help_players,
     enable_logfire,
+    fair_trade_analysis,
+    fair_trade_simulations,
+    fair_trade_output,
 ):
     """
     Catan Bot Simulator.
@@ -239,6 +258,9 @@ def simulate(
         output_options,
         game_config,
         quiet,
+        fair_trade_analysis=fair_trade_analysis,
+        fair_trade_simulations=fair_trade_simulations,
+        fair_trade_output=fair_trade_output,
     )
 
 
@@ -365,6 +387,9 @@ def play_batch(
     output_options=None,
     game_config=None,
     quiet=False,
+    fair_trade_analysis=False,
+    fair_trade_simulations=100,
+    fair_trade_output="fair_trade_logs",
 ):
     output_options = output_options or OutputOptions()
     game_config = game_config or GameConfigOptions()
@@ -411,6 +436,15 @@ def play_batch(
         from catanatron.web.database_accumulator import StepDatabaseAccumulator
 
         accumulators.append(StepDatabaseAccumulator())
+    if fair_trade_analysis:
+        from catanatron.cli.fair_trade_accumulator import FairTradeAccumulator
+
+        accumulators.append(
+            FairTradeAccumulator(
+                num_simulations=fair_trade_simulations,
+                output_dir=fair_trade_output,
+            )
+        )
     for accumulator_class in CUSTOM_ACCUMULATORS:
         accumulators.append(accumulator_class(players=players, game_config=game_config))
 
